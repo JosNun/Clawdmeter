@@ -6,13 +6,14 @@ selected via PlatformIO's `build_src_filter`. Adding a board means dropping in
 a new folder + a new `[env:...]` block — `main.cpp`, `ui.cpp`, and `splash.cpp`
 never see board-specific code. See [`docs/porting/adding-a-board.md`](docs/porting/adding-a-board.md).
 
-Five ports today (two SoC families, three panel sizes):
+Six ports today (three SoC families):
 
 - `boards/waveshare_amoled_216/` — original Waveshare ESP32-S3-Touch-AMOLED-2.16 (CO5300, 480×480 square, CST9220 touch, IMU rotation). Build env: `waveshare_amoled_216`.
 - `boards/waveshare_amoled_18/` — Waveshare ESP32-S3-Touch-AMOLED-1.8 (368×448 portrait, XCA9554 IO expander). Build env: `waveshare_amoled_18`. **Two panel revisions are auto-detected at boot** (`board_rev()` in `board_init.cpp`, enum in `board_rev.h`): original = SH8601 display + FT3168 touch (0x38); later = CO5300 display + CST816 touch (0x15). One binary drives both.
 - `boards/waveshare_amoled_216_c6/` — Waveshare ESP32-C6-Touch-AMOLED-2.16 (SH8601, 480×480, CST9217 touch). Build env: `waveshare_amoled_216_c6`. ESP32-C6 SoC: single-core RISC-V, **no PSRAM**, BLE 5 only.
 - `boards/waveshare_amoled_18_c6/` — Waveshare ESP32-C6-Touch-AMOLED-1.8 (368×448 portrait, SH8601, FT3168 touch, TCA9554 expander). Build env: `waveshare_amoled_18_c6`. Same panel as the S3 1.8 but on the C6 SoC. All subsystems (display, touch, BOOT + PWR buttons, battery, BLE) verified on hardware.
 - `boards/waveshare_amoled_206/` — Waveshare ESP32-S3-Touch-AMOLED-2.06 (CO5300, 410×502 watch form factor, FT3168 touch, no IO expander, 32 MB flash, PCF85063 RTC, ES8311 codec). Build env: `waveshare_amoled_206`. Display, touch, battery, IMU init, and BLE verified on hardware; the ES8311 chime path is not wired up (`sound.cpp` no-ops).
+- `boards/esp32_ssd1306/` — plain **ESP32-WROOM-32** dev board + **SSD1306 128×32 monochrome OLED over I2C** (SDA 21 / SCL 22, addr auto-probed 0x3C→0x3D). Build env: `esp32_ssd1306`. **Display-only port**: no touch, no PMU/battery, no IMU, no buttons/HID — just the quota usage on a 2-row mini layout. The SSD1306 is 1-bit, nothing like the QSPI AMOLEDs: a vendored `ssd1306.{h,cpp}` driver holds a 512-byte framebuffer, and `display.cpp` thresholds LVGL's RGB565 render strips to on/off pixels (so shared code stays RGB565 — no `LV_COLOR_DEPTH` change). UI uses a responsive `tiny` breakpoint in `ui.cpp::compute_layout()` (`height < 64`) that reuses the existing widgets. Boots straight to the usage view. **Verified on hardware**: display, BLE (advertises "Clawdmeter", macOS daemon connects), and the 2-row usage layout all render correctly. `screenshot` works here too (see QA note below).
 
 **C6 ports have no PSRAM** — shared code gates on `BOARD_HAS_PSRAM` (absent on C6) to use `MALLOC_CAP_INTERNAL` for LVGL/splash buffers, and the `screenshot` serial command is disabled (`LV_USE_SNAPSHOT=0`), so UI changes on a C6 board must be eyeballed on hardware, not auto-captured.
 
@@ -107,17 +108,21 @@ pio run -d firmware -e waveshare_amoled_18_c6                                   
 pio run -d firmware -e waveshare_amoled_206                                     # build 2.06 (S3, watch)
 pio run -d firmware -e waveshare_amoled_18 -t upload --upload-port /dev/cu.usbmodem101   # flash 1.8 on macOS
 pio run -d firmware -e waveshare_amoled_216 -t upload --upload-port /dev/ttyACM0         # flash 2.16 on Linux
+pio run -d firmware -e esp32_ssd1306                                            # build WROOM-32 + SSD1306
+pio run -d firmware -e esp32_ssd1306 -t upload --upload-port /dev/cu.usbserial-0001      # flash WROOM-32 (UART bridge) on macOS
 # C6 boards: same native USB-JTAG flashing; flag a chip mismatch ("This chip is ESP32-C6,
 # not ESP32-S3") means you picked an S3 env — use a *_c6 env for C6 hardware.
 ```
 
 If `pio` isn't on PATH: try `~/.platformio/penv/bin/pio` (Linux/macOS pio install) or `brew install platformio` on macOS.
 
-Device path differs by OS: `/dev/cu.usbmodem*` on macOS, `/dev/ttyACM0` on Linux. Both expose the ESP32-S3 native USB-JTAG (no boot-mode dance needed).
+Device path differs by OS: `/dev/cu.usbmodem*` on macOS, `/dev/ttyACM0` on Linux. The S3/C6 boards expose native USB-JTAG (no boot-mode dance). The **WROOM-32 board uses a UART bridge** (CP2102/CH340), so its port is `/dev/cu.usbserial-*` or `/dev/cu.SLAB_USBtoUART` (macOS) / `/dev/ttyUSB0` (Linux); auto-reset over DTR/RTS handles boot mode.
 
 ## QA your own UI changes — don't ask the user
 
-The firmware ships a `screenshot` serial command that dumps the LVGL framebuffer. `./screenshot.sh out.png [port]` captures a PNG sized to the active display (480×480 or 368×448). **Use this on every UI iteration** — Read the PNG with the Read tool, verify the change visually, iterate. Script auto-picks the macOS/Linux default port and falls back to pio's bundled Python if pyserial isn't on the system Python.
+The firmware ships a `screenshot` serial command that dumps the LVGL framebuffer. `./screenshot.sh out.png [port]` captures a PNG sized to the active display (480×480, 368×448, or 128×32). **Use this on every UI iteration** — Read the PNG with the Read tool, verify the change visually, iterate. Script auto-picks the macOS/Linux default port and falls back to pio's bundled Python if pyserial isn't on the system Python.
+
+Snapshot capture is gated on `LV_USE_SNAPSHOT` and needs a full-frame RGB565 buffer. PSRAM boards use PSRAM; PSRAM-free boards fall back to **internal SRAM for small frames only** (`send_screenshot` allows ≤64 KB — a 128×32 frame is ~8 KB and fits; the C6's 480×480 is ~460 KB and doesn't, so it sets `LV_USE_SNAPSHOT=0` and reports `SCREENSHOT_UNSUPPORTED`). The snapshot renders LVGL's RGB565 widget tree, so on the SSD1306 it shows the intended layout *before* the 1-bit threshold — perfect for alignment/centering QA. **Pass the port explicitly on the WROOM-32**: `./screenshot.sh out.png /dev/cu.usbserial-0001`. Note `screenshot.sh`'s capture loop has no overall timeout; if the board is mid-boot (opening the port can reset it) the command hangs — wait a couple seconds after reset/flash before capturing.
 
 The boot screen is `SCREEN_SPLASH` and only advances on a physical button press, so a fresh flash will sit on the splash. To screenshot the screen you're actually editing without asking the user to press a button, **temporarily change the default boot screen** in `main.cpp` (search for `ui_show_screen(SCREEN_SPLASH);`) to `SCREEN_USAGE` / `SCREEN_CONTROLLER` / `SCREEN_BLUETOOTH`, do your iteration, then revert before committing.
 

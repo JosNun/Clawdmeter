@@ -16,3 +16,8 @@ bool input_hal_is_held(InputButton btn) {
     }
     return false;
 }
+
+// No rotary encoder on this board.
+int  input_hal_encoder_delta(void)   { return 0; }
+bool input_hal_encoder_clicked(void) { return false; }
+void input_hal_encoder_debug(void)   {}

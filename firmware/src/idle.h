@@ -20,3 +20,7 @@ bool idle_consume_wake_press(void);
 // sleeves, etc.). Callers use this to silently drop touch events while the
 // panel is dark.
 bool idle_is_asleep(void);
+
+// Immediately begin fading the panel to sleep (e.g. the encoder menu's "Sleep
+// display" item). Any subsequent activity wakes it normally.
+void idle_force_sleep(void);

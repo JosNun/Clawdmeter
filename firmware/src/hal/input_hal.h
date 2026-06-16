@@ -24,3 +24,19 @@ void input_hal_init(void);
 // de-bounced at the caller's expense — the existing code polls every
 // loop iteration). Boards lacking a button always return false.
 bool input_hal_is_held(InputButton btn);
+
+// ---- Optional rotary encoder ----
+// Gated at runtime by BoardCaps.has_encoder, so shared code stays #ifdef-free.
+// Boards without an encoder link the trivial stubs (return 0 / false / no-op).
+
+// Net detents turned since the last call: positive = clockwise, negative =
+// counter-clockwise, 0 if it hasn't moved. Consuming reads (resets the count).
+int input_hal_encoder_delta(void);
+
+// True once per debounced press of the encoder's push switch (press edge).
+bool input_hal_encoder_clicked(void);
+
+// Print the raw level of each encoder pin to Serial — an identification aid
+// for wiring up a new encoder (which GPIO is A/B vs the switch). No-op on
+// boards without an encoder.
+void input_hal_encoder_debug(void);

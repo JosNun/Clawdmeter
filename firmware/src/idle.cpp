@@ -75,6 +75,12 @@ bool idle_is_asleep(void) {
     return state == STATE_ASLEEP || state == STATE_FADING_OUT;
 }
 
+void idle_force_sleep(void) {
+    if (state == STATE_ASLEEP || state == STATE_FADING_OUT) return;
+    begin_fade(0, millis());
+    state = STATE_FADING_OUT;
+}
+
 void idle_tick(void) {
     uint32_t now = millis();
 

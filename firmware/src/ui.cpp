@@ -24,6 +24,10 @@ LV_FONT_DECLARE(font_mono_18);
 // new display size means extending compute_layout() with another
 // breakpoint — never editing the screen-builder functions below.
 struct Layout {
+    bool    tiny;            // very small monochrome panels (e.g. 128x32) use a
+                             // dedicated 2-row mini layout, not the card UI below
+    const lv_font_t* tiny_font;
+
     int16_t scr_w, scr_h;
     int16_t margin;
     int16_t title_y;
@@ -76,6 +80,19 @@ static void compute_layout(const BoardCaps& c) {
     L.scr_h = c.height;
     L.margin = 20;
     L.title_y = 30;
+
+    // Very small monochrome panels (128x32-class) can't hold the card UI at
+    // all — the screen builder switches to a 2-row mini layout. Only the few
+    // fields below matter on this path; the rest are left at their defaults.
+    L.tiny = (c.height < 64);
+    if (L.tiny) {
+        L.margin = 0;
+        L.title_y = 0;
+        L.content_y = 0;
+        L.content_w = c.width;
+        L.tiny_font = &font_styrene_12;
+        return;
+    }
 
     // Values shared by the two original breakpoints; the small branch below
     // overrides them wholesale.
@@ -309,6 +326,16 @@ static void format_reset_time(int mins, char* buf, size_t len) {
     }
 }
 
+// Compact reset string for the tiny mono layout, where only ~3 chars fit
+// ("2h", "3d", "45m", "--"). The full "Resets in 2h 10m" form is used on the
+// larger panels (format_reset_time above).
+static void format_reset_compact(int mins, char* buf, size_t len) {
+    if (mins < 0)          snprintf(buf, len, "--");
+    else if (mins < 60)    snprintf(buf, len, "%dm", mins);
+    else if (mins < 1440)  snprintf(buf, len, "%dh", mins / 60);
+    else                   snprintf(buf, len, "%dd", mins / 1440);
+}
+
 // Forward decls — callbacks defined near ui_show_screen below
 static void global_click_cb(lv_event_t* e);
 
@@ -467,7 +494,164 @@ static void build_idle_group(lv_obj_t* parent) {
     lv_obj_add_flag(idle_group, LV_OBJ_FLAG_HIDDEN);  // update_view_state decides
 }
 
+// ======== Tiny mono layout (128x32-class panels) ========
+// Reuses the same widget globals as the full UI (bar_session, lbl_*_pct,
+// lbl_*_reset, usage_group/pair_group/idle_group, lbl_anim) so ui_update(),
+// ui_tick_anim(), and update_view_state() all work unchanged — only the
+// geometry and fonts differ. No logo, battery, status line, or splash here.
+
+static lv_obj_t* tiny_label(lv_obj_t* parent, int x, int y, const char* txt, lv_color_t col) {
+    lv_obj_t* l = lv_label_create(parent);
+    lv_label_set_text(l, txt);
+    lv_obj_set_style_text_font(l, L.tiny_font, 0);
+    lv_obj_set_style_text_color(l, col, 0);
+    lv_obj_set_pos(l, x, y);
+    return l;
+}
+
+// One usage window per row: "S 45% [====-- ] 2h". The empty bar track is dark
+// (reads as off on a 1-bit panel) so it gets a thin outline to stay visible;
+// the indicator is solid (ui_update recolors it, all colors read as on).
+static void make_tiny_row(lv_obj_t* parent, int y, const char* tag,
+                          lv_obj_t** out_pct, lv_obj_t** out_bar, lv_obj_t** out_reset) {
+    // styrene_12 reserves 3px of descender space at the bottom of its line
+    // box; since our text has no descenders, the ink rides high. Nudge text +
+    // bar down a couple px so each row reads as vertically centered.
+    const int ty = y + 3;   // text baseline-ish offset within the 16px row
+    const int by = y + 6;   // bar offset (kept aligned with the text)
+    tiny_label(parent, 1, ty, tag, COL_TEXT);
+    *out_pct = tiny_label(parent, 14, ty, "--%", COL_TEXT);
+
+    lv_obj_t* bar = lv_bar_create(parent);
+    lv_obj_set_pos(bar, 48, by);
+    lv_obj_set_size(bar, 52, 6);
+    lv_bar_set_range(bar, 0, 100);
+    lv_bar_set_value(bar, 0, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(bar, COL_BAR_BG, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_radius(bar, 1, LV_PART_MAIN);
+    lv_obj_set_style_border_width(bar, 1, LV_PART_MAIN);
+    lv_obj_set_style_border_color(bar, COL_DIM, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(bar, COL_TEXT, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, LV_PART_INDICATOR);
+    lv_obj_set_style_radius(bar, 1, LV_PART_INDICATOR);
+    *out_bar = bar;
+
+    *out_reset = tiny_label(parent, 104, ty, "--", COL_DIM);
+}
+
+static lv_obj_t* make_tiny_overlay(lv_obj_t* parent, const char* text) {
+    lv_obj_t* g = lv_obj_create(parent);
+    lv_obj_set_size(g, L.scr_w, L.scr_h);
+    lv_obj_set_pos(g, 0, 0);
+    lv_obj_set_style_bg_color(g, COL_BG, 0);
+    lv_obj_set_style_bg_opa(g, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(g, 0, 0);
+    lv_obj_set_style_pad_all(g, 0, 0);
+    lv_obj_clear_flag(g, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t* l = tiny_label(g, 0, 0, text, COL_TEXT);
+    lv_obj_center(l);
+    lv_obj_add_flag(g, LV_OBJ_FLAG_HIDDEN);  // update_view_state decides
+    return g;
+}
+
+// ---- Encoder settings menu (tiny mono layout) ----
+// A full-screen opaque overlay over the usage view. Only two rows fit on a
+// 32px panel, so we show a 2-item window starting at the selection: the
+// highlighted item (inverted bar) on top, the next item dim below. Rotating
+// scrolls the window (wrapping), clicking activates the top item. The overlay
+// is built only on the tiny layout; menu_overlay stays null elsewhere and all
+// the public ui_menu_* calls early-out, so they're safe no-ops on other boards.
+static lv_obj_t* menu_overlay = nullptr;
+static lv_obj_t* menu_row[2]  = {nullptr, nullptr};
+static int       menu_sel     = 0;
+
+static const struct {
+    const char*   label;
+    menu_action_t action;
+} MENU_ITEMS[] = {
+    {"Refresh now",   MENU_ACT_REFRESH},
+    {"Re-pair",       MENU_ACT_REPAIR},
+    {"Sleep display", MENU_ACT_SLEEP},
+    {"Back",          MENU_ACT_BACK},
+};
+#define MENU_COUNT ((int)(sizeof(MENU_ITEMS) / sizeof(MENU_ITEMS[0])))
+
+static void render_menu(void) {
+    for (int i = 0; i < 2; i++) {
+        int idx = (menu_sel + i) % MENU_COUNT;
+        lv_label_set_text(menu_row[i], MENU_ITEMS[idx].label);
+        if (i == 0) {  // highlighted — inverted bar (reads cleanly on 1-bit)
+            lv_obj_set_style_bg_color(menu_row[i], COL_TEXT, 0);
+            lv_obj_set_style_bg_opa(menu_row[i], LV_OPA_COVER, 0);
+            lv_obj_set_style_text_color(menu_row[i], COL_BG, 0);
+        } else {
+            lv_obj_set_style_bg_opa(menu_row[i], LV_OPA_TRANSP, 0);
+            lv_obj_set_style_text_color(menu_row[i], COL_DIM, 0);
+        }
+    }
+}
+
+static void build_menu_overlay(lv_obj_t* parent) {
+    menu_overlay = lv_obj_create(parent);
+    lv_obj_set_size(menu_overlay, L.scr_w, L.scr_h);
+    lv_obj_set_pos(menu_overlay, 0, 0);
+    lv_obj_set_style_bg_color(menu_overlay, COL_BG, 0);
+    lv_obj_set_style_bg_opa(menu_overlay, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(menu_overlay, 0, 0);
+    lv_obj_set_style_pad_all(menu_overlay, 0, 0);
+    lv_obj_clear_flag(menu_overlay, LV_OBJ_FLAG_SCROLLABLE);
+
+    for (int i = 0; i < 2; i++) {
+        lv_obj_t* l = lv_label_create(menu_overlay);
+        lv_obj_set_size(l, L.scr_w, 16);
+        lv_obj_set_pos(l, 0, i * 16);
+        lv_obj_set_style_text_font(l, L.tiny_font, 0);
+        lv_obj_set_style_pad_left(l, 3, 0);
+        lv_obj_set_style_pad_top(l, 2, 0);
+        menu_row[i] = l;
+    }
+
+    lv_obj_add_flag(menu_overlay, LV_OBJ_FLAG_HIDDEN);  // opened by ui_menu_open()
+}
+
+static void init_usage_screen_tiny(lv_obj_t* scr) {
+    usage_container = lv_obj_create(scr);
+    lv_obj_set_size(usage_container, L.scr_w, L.scr_h);
+    lv_obj_set_pos(usage_container, 0, 0);
+    lv_obj_set_style_bg_opa(usage_container, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(usage_container, 0, 0);
+    lv_obj_set_style_pad_all(usage_container, 0, 0);
+    lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_SCROLLABLE);
+
+    usage_group = lv_obj_create(usage_container);
+    lv_obj_set_size(usage_group, L.scr_w, L.scr_h);
+    lv_obj_set_pos(usage_group, 0, 0);
+    lv_obj_set_style_bg_opa(usage_group, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(usage_group, 0, 0);
+    lv_obj_set_style_pad_all(usage_group, 0, 0);
+    lv_obj_clear_flag(usage_group, LV_OBJ_FLAG_SCROLLABLE);
+
+    make_tiny_row(usage_group, 0,  "S", &lbl_session_pct, &bar_session, &lbl_session_reset);
+    make_tiny_row(usage_group, 16, "W", &lbl_weekly_pct,  &bar_weekly,  &lbl_weekly_reset);
+
+    pair_group = make_tiny_overlay(usage_container, "Waiting for host\xE2\x80\xA6");
+    idle_group = make_tiny_overlay(usage_container, "No data\xE2\x80\xA6");
+
+    // Settings menu overlay — created last so it sits above the usage rows and
+    // the pair/idle overlays when opened.
+    build_menu_overlay(usage_container);
+
+    // lbl_anim must exist (ui_tick_anim writes to it) but there's no room for
+    // a status line on a 2-row 32px panel — keep it hidden.
+    lbl_anim = lv_label_create(usage_container);
+    lv_label_set_text(lbl_anim, "");
+    lv_obj_add_flag(lbl_anim, LV_OBJ_FLAG_HIDDEN);
+}
+
 static void init_usage_screen(lv_obj_t* scr) {
+    if (L.tiny) { init_usage_screen_tiny(scr); return; }
+
     usage_container = lv_obj_create(scr);
     lv_obj_set_size(usage_container, L.scr_w, L.scr_h);
     lv_obj_set_pos(usage_container, 0, 0);
@@ -547,11 +731,16 @@ void ui_init(void) {
     lv_obj_set_style_bg_color(scr, COL_BG, 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
+    init_usage_screen(scr);
+
+    // The tiny mono layout has no splash, logo, or battery indicator. Skip all
+    // of it — leaving logo_img/battery_img null, which the update paths guard.
+    if (L.tiny) return;
+
     if (L.small_icons) init_icon_dsc_rgb565a8(&logo_dsc, LOGO_SMALL_WIDTH, LOGO_SMALL_HEIGHT, logo_small_data);
     else               init_icon_dsc_rgb565a8(&logo_dsc, LOGO_WIDTH, LOGO_HEIGHT, logo_data);
     init_battery_icons();
 
-    init_usage_screen(scr);
     splash_init(scr);
 
     if (splash_get_root()) {
@@ -627,7 +816,8 @@ void ui_update(const UsageData* data) {
                         LV_ALIGN_OUT_RIGHT_TOP, 4, 12);
     } else {
         lv_label_set_text_fmt(lbl_session_pct, "%d%%", s_pct);
-        format_reset_time(data->session_reset_mins, buf, sizeof(buf));
+        if (L.tiny) format_reset_compact(data->session_reset_mins, buf, sizeof(buf));
+        else        format_reset_time(data->session_reset_mins, buf, sizeof(buf));
         lv_label_set_text(lbl_session_reset, buf);
     }
 
@@ -651,7 +841,8 @@ void ui_update(const UsageData* data) {
         lv_label_set_text_fmt(lbl_weekly_pct, "%d%%", w_pct);
         lv_bar_set_value(bar_weekly, w_pct, LV_ANIM_ON);
         lv_obj_set_style_bg_color(bar_weekly, pct_color(data->weekly_pct), LV_PART_INDICATOR);
-        format_reset_time(data->weekly_reset_mins, buf, sizeof(buf));
+        if (L.tiny) format_reset_compact(data->weekly_reset_mins, buf, sizeof(buf));
+        else        format_reset_time(data->weekly_reset_mins, buf, sizeof(buf));
         lv_label_set_text(lbl_weekly_reset, buf);
     }
 }
@@ -751,6 +942,14 @@ static void global_click_cb(lv_event_t* e) {
 }
 
 void ui_show_screen(screen_t screen) {
+    // Tiny mono panels have no splash — the usage view is the only screen, so
+    // any request (including the boot SCREEN_SPLASH) resolves to it.
+    if (L.tiny) {
+        lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_HIDDEN);
+        current_screen = SCREEN_USAGE;
+        return;
+    }
+
     lv_obj_add_flag(usage_container, LV_OBJ_FLAG_HIDDEN);
     splash_hide();
 
@@ -789,8 +988,37 @@ void ui_update_ble_status(ble_state_t state, const char* name, const char* mac) 
     update_view_state();
 }
 
+// ---- Encoder settings menu ----
+
+void ui_menu_open(void) {
+    if (!menu_overlay) return;
+    menu_sel = 0;
+    render_menu();
+    lv_obj_clear_flag(menu_overlay, LV_OBJ_FLAG_HIDDEN);
+}
+
+void ui_menu_close(void) {
+    if (!menu_overlay) return;
+    lv_obj_add_flag(menu_overlay, LV_OBJ_FLAG_HIDDEN);
+}
+
+bool ui_menu_is_open(void) {
+    return menu_overlay && !lv_obj_has_flag(menu_overlay, LV_OBJ_FLAG_HIDDEN);
+}
+
+void ui_menu_move(int delta) {
+    if (!menu_overlay) return;
+    menu_sel = (((menu_sel + delta) % MENU_COUNT) + MENU_COUNT) % MENU_COUNT;
+    render_menu();
+}
+
+menu_action_t ui_menu_activate(void) {
+    if (!menu_overlay) return MENU_ACT_NONE;
+    return MENU_ITEMS[menu_sel].action;
+}
+
 void ui_update_battery(int percent, bool charging) {
-    if (!battery_img) return;
+    if (!battery_img) return;   // no battery indicator (e.g. tiny mono layout)
     int idx;
     if (charging) {
         idx = 4;

@@ -23,3 +23,10 @@ bool input_hal_is_held(InputButton btn) {
     }
     return false;
 }
+
+// Rotary encoder — implement if BOARD_HAS_ENCODER is set in board.h (see the
+// esp32_ssd1306 port for a quadrature-ISR + debounced-switch reference). The
+// stubs below keep boards without one linking cleanly.
+int  input_hal_encoder_delta(void)   { return 0; }
+bool input_hal_encoder_clicked(void) { return false; }
+void input_hal_encoder_debug(void)   {}

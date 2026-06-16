@@ -130,19 +130,24 @@ static char cmd_buf[CMD_BUF_SIZE];
 static int cmd_pos = 0;
 
 static void send_screenshot() {
-#ifndef BOARD_HAS_PSRAM
-    // A full RGB565 framebuffer doesn't fit in internal SRAM on PSRAM-free
-    // boards (e.g. 480×480×2 = 460 KB). Capture is unsupported there.
-    Serial.println("SCREENSHOT_UNSUPPORTED");
-    return;
-#else
+#if LV_USE_SNAPSHOT
     const uint32_t w = board_caps().width;
     const uint32_t h = board_caps().height;
     const uint32_t row_bytes = w * 2;
     const uint32_t buf_size = row_bytes * h;
-    uint8_t* sbuf = (uint8_t*)heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM);
+
+    // Prefer PSRAM. On PSRAM-free boards fall back to internal SRAM, but only
+    // for frames small enough to spare it: a 480×480 frame is ~460 KB and
+    // won't fit, whereas a 128×32 frame is ~8 KB and does.
+    uint8_t* sbuf = nullptr;
+#ifdef BOARD_HAS_PSRAM
+    sbuf = (uint8_t*)heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM);
+#else
+    if (buf_size <= 64u * 1024u)
+        sbuf = (uint8_t*)heap_caps_malloc(buf_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+#endif
     if (!sbuf) {
-        Serial.println("SCREENSHOT_ERR");
+        Serial.println("SCREENSHOT_UNSUPPORTED");
         return;
     }
 
@@ -164,6 +169,10 @@ static void send_screenshot() {
     Serial.println();
     Serial.println("SCREENSHOT_END");
     heap_caps_free(sbuf);
+#else
+    // Built without LVGL snapshot support (e.g. the C6, where a full frame
+    // can't fit internal SRAM anyway).
+    Serial.println("SCREENSHOT_UNSUPPORTED");
 #endif
 }
 
@@ -174,6 +183,7 @@ static void check_serial_cmd() {
             cmd_buf[cmd_pos] = '\0';
             if (strcmp(cmd_buf, "screenshot") == 0) send_screenshot();
             else if (strcmp(cmd_buf, "buzz") == 0)  sound_hal_play_reset();
+            else if (strcmp(cmd_buf, "encdbg") == 0) input_hal_encoder_debug();
             cmd_pos = 0;
         } else if (cmd_pos < CMD_BUF_SIZE - 1) {
             cmd_buf[cmd_pos++] = c;
@@ -349,6 +359,47 @@ void loop() {
         }
 
         pair_tick();
+    }
+
+    // ---- Rotary encoder (boards that have one) ----
+    //   turn (usage view) → adjust brightness
+    //   click             → open the settings menu
+    //   turn / click (menu) → move selection / activate the highlighted item
+    // The first interaction from sleep just wakes the panel (swallowed), like
+    // the buttons. The menu auto-closes after a few seconds of inactivity.
+    if (board_caps().has_encoder) {
+        static uint32_t menu_activity_ms = 0;
+        const uint32_t  MENU_TIMEOUT_MS = 6000;
+
+        int  delta   = input_hal_encoder_delta();
+        bool clicked = input_hal_encoder_clicked();
+
+        if ((delta != 0 || clicked) && idle_consume_wake_press()) {
+            // Woke from sleep — consume this interaction, don't act on it.
+            delta = 0;
+            clicked = false;
+        }
+
+        if (ui_menu_is_open()) {
+            if (delta)   { ui_menu_move(delta); menu_activity_ms = millis(); }
+            if (clicked) {
+                menu_action_t act = ui_menu_activate();
+                switch (act) {
+                case MENU_ACT_REFRESH: ble_request_refresh(); break;
+                case MENU_ACT_REPAIR:  ble_clear_bonds();      break;
+                case MENU_ACT_SLEEP:   ui_menu_close(); idle_force_sleep(); break;
+                case MENU_ACT_BACK:
+                case MENU_ACT_NONE:    break;
+                }
+                if (act != MENU_ACT_SLEEP) ui_menu_close();
+                menu_activity_ms = millis();
+            }
+            if (ui_menu_is_open() && millis() - menu_activity_ms >= MENU_TIMEOUT_MS)
+                ui_menu_close();
+        } else {
+            if (delta)   brightness_adjust(delta);
+            if (clicked) { ui_menu_open(); menu_activity_ms = millis(); }
+        }
     }
 
     ble_state_t bs = ble_get_state();
