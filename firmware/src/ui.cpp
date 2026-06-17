@@ -584,6 +584,7 @@ static lv_obj_t* menu_track_light = nullptr;  // clipped to the region below
 static lv_obj_t* menu_row_dark[MENU_ROWS]  = {nullptr};
 static lv_obj_t* menu_row_light[MENU_ROWS] = {nullptr};
 static int       menu_sel = 0;
+static bool      menu_closing = false;  // true while the close slide-out plays
 
 static const struct {
     const char*   label;
@@ -958,6 +959,40 @@ void ui_update(const UsageData* data) {
 // (connected but data has gone stale), or the live usage panels. Only re-lays-out
 // on an actual change. The animated status line stays visible everywhere — it
 // reads "Listening…" on the idle screen, keeping it alive rather than frozen.
+// The three view groups (pair / idle / usage) are full-width siblings stacked
+// at x=0. update_view_state() swaps them with a horizontal push-wipe: the
+// outgoing group slides off one edge while the incoming one slides in from the
+// other. Direction follows the state rank (pair=0 → idle=1 → usage=2): a higher
+// state enters from the right (the list "advances"), a lower one from the left.
+#define VIEW_WIPE_MS 200
+
+static lv_obj_t* view_group_ptr(int v) {
+    return v == 0 ? pair_group : (v == 1 ? idle_group : usage_group);
+}
+
+static void view_anim_x_cb(void* obj, int32_t x) {
+    lv_obj_set_x((lv_obj_t*)obj, (int)x);
+}
+
+static void view_slide_out_done(lv_anim_t* a) {
+    lv_obj_t* g = (lv_obj_t*)a->var;
+    lv_obj_add_flag(g, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_x(g, 0);  // park at rest for the next transition
+}
+
+static void view_slide(lv_obj_t* g, int from, int to, bool hide_when_done) {
+    lv_obj_clear_flag(g, LV_OBJ_FLAG_HIDDEN);
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, g);
+    lv_anim_set_exec_cb(&a, view_anim_x_cb);
+    lv_anim_set_values(&a, from, to);
+    lv_anim_set_duration(&a, VIEW_WIPE_MS);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_in_out);
+    if (hide_when_done) lv_anim_set_completed_cb(&a, view_slide_out_done);
+    lv_anim_start(&a);  // replaces any in-flight slide on this group
+}
+
 static void update_view_state(void) {
     if (!usage_group || !pair_group || !idle_group) return;
     int v;
@@ -969,12 +1004,36 @@ static void update_view_state(void) {
         v = 1;  // idle / Zzz
     }
     if (v == view_state) return;
+    int old = view_state;
     view_state = v;
-    lv_obj_add_flag(pair_group, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(idle_group, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(usage_group, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_flag(v == 0 ? pair_group : v == 1 ? idle_group : usage_group,
-                      LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_t* groups[3] = {pair_group, idle_group, usage_group};
+    // Cancel any in-flight wipe and park every group at rest first.
+    for (int i = 0; i < 3; i++) {
+        lv_anim_delete(groups[i], view_anim_x_cb);
+        lv_obj_set_x(groups[i], 0);
+    }
+
+    lv_obj_t* nw = view_group_ptr(v);
+
+    if (old < 0) {  // first resolve (boot) — snap, no wipe
+        for (int i = 0; i < 3; i++)
+            (groups[i] == nw) ? lv_obj_clear_flag(groups[i], LV_OBJ_FLAG_HIDDEN)
+                              : lv_obj_add_flag(groups[i], LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+
+    lv_obj_t* od  = view_group_ptr(old);
+    int       W   = L.scr_w;
+    int       dir = (v > old) ? 1 : -1;  // advancing state → incoming from right
+
+    // Hide groups not taking part in this transition.
+    for (int i = 0; i < 3; i++)
+        if (groups[i] != nw && groups[i] != od)
+            lv_obj_add_flag(groups[i], LV_OBJ_FLAG_HIDDEN);
+
+    view_slide(nw,  dir * W, 0,        false);  // incoming
+    view_slide(od,  0,      -dir * W,  true);   // outgoing, hides itself at rest
 }
 
 void ui_tick_anim(void) {
@@ -1109,24 +1168,52 @@ void ui_brightness_hud_show(uint8_t level) {
     }
 }
 
+// The menu is a modal panel: opening slides it in from the right over the
+// (static) usage view; closing slides it back out to the right, revealing the
+// view underneath. Reuses the view-wipe cb/duration so the motion matches.
+static void menu_close_done(lv_anim_t* a) {
+    (void)a;
+    lv_obj_add_flag(menu_overlay, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_x(menu_overlay, 0);  // park at rest for the next open
+    menu_closing = false;
+}
+
 void ui_menu_open(void) {
     if (!menu_overlay) return;
     if (bright_hud) lv_obj_add_flag(bright_hud, LV_OBJ_FLAG_HIDDEN);  // HUD yields to menu
+    menu_closing = false;
     menu_sel = 0;
     render_menu();
-    lv_anim_delete(menu_track_dark, menu_track_y_cb);  // cancel any in-flight slide
+    lv_anim_delete(menu_track_dark, menu_track_y_cb);  // reset internal scroll
     menu_track_y_cb(nullptr, MENU_REST_Y);
+    lv_anim_delete(menu_overlay, view_anim_x_cb);       // cancel any close slide
     lv_obj_clear_flag(menu_overlay, LV_OBJ_FLAG_HIDDEN);
+    view_slide(menu_overlay, L.scr_w, 0, false);        // slide in from the right
 }
 
 void ui_menu_close(void) {
-    if (!menu_overlay) return;
-    lv_anim_delete(menu_track_dark, menu_track_y_cb);  // stop any in-flight slide
-    lv_obj_add_flag(menu_overlay, LV_OBJ_FLAG_HIDDEN);
+    if (!menu_overlay || menu_closing) return;
+    if (lv_obj_has_flag(menu_overlay, LV_OBJ_FLAG_HIDDEN)) return;  // already closed
+    menu_closing = true;
+    lv_anim_delete(menu_track_dark, menu_track_y_cb);   // stop internal scroll
+    lv_anim_delete(menu_overlay, view_anim_x_cb);       // cancel open slide if mid-flight
+    // Slide out to the right from wherever it is, then hide via menu_close_done.
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, menu_overlay);
+    lv_anim_set_exec_cb(&a, view_anim_x_cb);
+    lv_anim_set_values(&a, lv_obj_get_x(menu_overlay), L.scr_w);
+    lv_anim_set_duration(&a, VIEW_WIPE_MS);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_in_out);
+    lv_anim_set_completed_cb(&a, menu_close_done);
+    lv_anim_start(&a);
 }
 
 bool ui_menu_is_open(void) {
-    return menu_overlay && !lv_obj_has_flag(menu_overlay, LV_OBJ_FLAG_HIDDEN);
+    // "Open" means it's the active modal — a menu mid-close-slide is not, so the
+    // encoder loop stops steering it and brightness control resumes immediately.
+    return menu_overlay && !menu_closing &&
+           !lv_obj_has_flag(menu_overlay, LV_OBJ_FLAG_HIDDEN);
 }
 
 void ui_menu_move(int delta) {
