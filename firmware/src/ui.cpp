@@ -556,15 +556,34 @@ static lv_obj_t* make_tiny_overlay(lv_obj_t* parent, const char* text) {
 }
 
 // ---- Encoder settings menu (tiny mono layout) ----
-// A full-screen opaque overlay over the usage view. Only two rows fit on a
-// 32px panel, so we show a 2-item window starting at the selection: the
-// highlighted item (inverted bar) on top, the next item dim below. Rotating
-// scrolls the window (wrapping), clicking activates the top item. The overlay
-// is built only on the tiny layout; menu_overlay stays null elsewhere and all
-// the public ui_menu_* calls early-out, so they're safe no-ops on other boards.
-static lv_obj_t* menu_overlay = nullptr;
-static lv_obj_t* menu_row[2]  = {nullptr, nullptr};
-static int       menu_sel     = 0;
+// A full-screen opaque overlay over the usage view. Only two 16px rows fit on a
+// 32px panel, so we show a 2-item window: the selected item highlighted by a
+// fixed inverted bar in the TOP slot, the next item dim below. Rotating scrolls
+// the list through the bar (wrapping), clicking activates the item in the bar.
+//
+// The highlight bar is pinned at screen y=0; rotating slides the row list so the
+// picked row glides into the bar. On a 1-bit panel a row must flip from
+// light-on-black (below the bar) to dark-on-white (inside it) as it crosses the
+// bar's bottom edge. We get that by keeping TWO synchronized copies of the row
+// list: a dark-text copy clipped to the bar region (top 16px), and a dim-text
+// copy clipped to everything below. Both ride identical 4-row tracks slid in
+// lockstep, so wherever a row sits decides which copy is visible — it inverts
+// exactly at the bar edge with no per-pixel color morph.
+//
+// The window content is [sel-1 .. sel+2] (wrapping). At rest the tracks sit so
+// row index 1 (the selection) fills the bar and row 2 shows dim below. A move
+// repaints the window for the new selection, offsets the tracks one row in the
+// scroll direction, and slides them back to rest. Built only on the tiny
+// layout; menu_overlay stays null elsewhere and the public ui_menu_* calls
+// early-out, so they're safe no-ops on other boards.
+#define MENU_ROWS   4
+#define MENU_REST_Y (-16)   // dark-track y at rest: row index 1 lands in the bar
+static lv_obj_t* menu_overlay     = nullptr;
+static lv_obj_t* menu_track_dark  = nullptr;  // clipped to the bar (top 16px)
+static lv_obj_t* menu_track_light = nullptr;  // clipped to the region below
+static lv_obj_t* menu_row_dark[MENU_ROWS]  = {nullptr};
+static lv_obj_t* menu_row_light[MENU_ROWS] = {nullptr};
+static int       menu_sel = 0;
 
 static const struct {
     const char*   label;
@@ -577,19 +596,57 @@ static const struct {
 };
 #define MENU_COUNT ((int)(sizeof(MENU_ITEMS) / sizeof(MENU_ITEMS[0])))
 
+// Paint the 4-row window [menu_sel-1 .. menu_sel+2] (wrapping) into both copies.
+// Colors are fixed at build time (dark copy = bar text, light copy = dim text);
+// here we only set the strings.
 static void render_menu(void) {
-    for (int i = 0; i < 2; i++) {
-        int idx = (menu_sel + i) % MENU_COUNT;
-        lv_label_set_text(menu_row[i], MENU_ITEMS[idx].label);
-        if (i == 0) {  // highlighted — inverted bar (reads cleanly on 1-bit)
-            lv_obj_set_style_bg_color(menu_row[i], COL_TEXT, 0);
-            lv_obj_set_style_bg_opa(menu_row[i], LV_OPA_COVER, 0);
-            lv_obj_set_style_text_color(menu_row[i], COL_BG, 0);
-        } else {
-            lv_obj_set_style_bg_opa(menu_row[i], LV_OPA_TRANSP, 0);
-            lv_obj_set_style_text_color(menu_row[i], COL_DIM, 0);
-        }
+    for (int i = 0; i < MENU_ROWS; i++) {
+        int idx = (((menu_sel - 1 + i) % MENU_COUNT) + MENU_COUNT) % MENU_COUNT;
+        lv_label_set_text(menu_row_dark[i],  MENU_ITEMS[idx].label);
+        lv_label_set_text(menu_row_light[i], MENU_ITEMS[idx].label);
     }
+}
+
+// Slide both tracks together. The dark track rides the bar's coordinate space
+// (origin y=0); the light track's clip starts 16px lower, so subtracting 16
+// keeps a given row pixel-aligned across both copies as it crosses the edge.
+static void menu_track_y_cb(void* obj, int32_t v) {
+    (void)obj;
+    lv_obj_set_y(menu_track_dark,  v);
+    lv_obj_set_y(menu_track_light, v - 16);
+}
+
+// One 4-row track (128×64) inside a 16px-tall clip window, with rows in `color`.
+static lv_obj_t* build_menu_track(lv_obj_t* parent, int clip_y, lv_color_t color,
+                                  lv_obj_t** rows_out) {
+    lv_obj_t* clip = lv_obj_create(parent);
+    lv_obj_set_size(clip, L.scr_w, 16);
+    lv_obj_set_pos(clip, 0, clip_y);
+    lv_obj_set_style_bg_opa(clip, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(clip, 0, 0);
+    lv_obj_set_style_radius(clip, 0, 0);  // square clip — no rounded-corner cropping
+    lv_obj_set_style_pad_all(clip, 0, 0);
+    lv_obj_clear_flag(clip, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* track = lv_obj_create(clip);
+    lv_obj_set_size(track, L.scr_w, MENU_ROWS * 16);
+    lv_obj_set_pos(track, 0, MENU_REST_Y);
+    lv_obj_set_style_bg_opa(track, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(track, 0, 0);
+    lv_obj_set_style_pad_all(track, 0, 0);
+    lv_obj_clear_flag(track, LV_OBJ_FLAG_SCROLLABLE);
+
+    for (int i = 0; i < MENU_ROWS; i++) {
+        lv_obj_t* l = lv_label_create(track);
+        lv_obj_set_size(l, L.scr_w, 16);
+        lv_obj_set_pos(l, 0, i * 16);
+        lv_obj_set_style_text_font(l, L.tiny_font, 0);
+        lv_obj_set_style_text_color(l, color, 0);
+        lv_obj_set_style_pad_left(l, 3, 0);
+        lv_obj_set_style_pad_top(l, 2, 0);
+        rows_out[i] = l;
+    }
+    return track;
 }
 
 static void build_menu_overlay(lv_obj_t* parent) {
@@ -602,15 +659,18 @@ static void build_menu_overlay(lv_obj_t* parent) {
     lv_obj_set_style_pad_all(menu_overlay, 0, 0);
     lv_obj_clear_flag(menu_overlay, LV_OBJ_FLAG_SCROLLABLE);
 
-    for (int i = 0; i < 2; i++) {
-        lv_obj_t* l = lv_label_create(menu_overlay);
-        lv_obj_set_size(l, L.scr_w, 16);
-        lv_obj_set_pos(l, 0, i * 16);
-        lv_obj_set_style_text_font(l, L.tiny_font, 0);
-        lv_obj_set_style_pad_left(l, 3, 0);
-        lv_obj_set_style_pad_top(l, 2, 0);
-        menu_row[i] = l;
-    }
+    // Fixed inverted highlight bar in the top slot (drawn under the dark copy).
+    lv_obj_t* bar = lv_obj_create(menu_overlay);
+    lv_obj_set_size(bar, L.scr_w, 16);
+    lv_obj_set_pos(bar, 0, 0);
+    lv_obj_set_style_bg_color(bar, COL_TEXT, 0);
+    lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(bar, 0, 0);
+    lv_obj_set_style_radius(bar, 0, 0);
+
+    // Light copy (dim, below the bar) first, then dark copy (over the bar).
+    menu_track_light = build_menu_track(menu_overlay, 16, COL_DIM, menu_row_light);
+    menu_track_dark  = build_menu_track(menu_overlay, 0,  COL_BG,  menu_row_dark);
 
     lv_obj_add_flag(menu_overlay, LV_OBJ_FLAG_HIDDEN);  // opened by ui_menu_open()
 }
@@ -994,11 +1054,14 @@ void ui_menu_open(void) {
     if (!menu_overlay) return;
     menu_sel = 0;
     render_menu();
+    lv_anim_delete(menu_track_dark, menu_track_y_cb);  // cancel any in-flight slide
+    menu_track_y_cb(nullptr, MENU_REST_Y);
     lv_obj_clear_flag(menu_overlay, LV_OBJ_FLAG_HIDDEN);
 }
 
 void ui_menu_close(void) {
     if (!menu_overlay) return;
+    lv_anim_delete(menu_track_dark, menu_track_y_cb);  // stop any in-flight slide
     lv_obj_add_flag(menu_overlay, LV_OBJ_FLAG_HIDDEN);
 }
 
@@ -1007,9 +1070,22 @@ bool ui_menu_is_open(void) {
 }
 
 void ui_menu_move(int delta) {
-    if (!menu_overlay) return;
+    if (!menu_overlay || delta == 0) return;
     menu_sel = (((menu_sel + delta) % MENU_COUNT) + MENU_COUNT) % MENU_COUNT;
     render_menu();
+    // Offset the tracks one row in the scroll direction so the bar still shows
+    // the OLD selection, then slide to rest: turning down (delta>0) scrolls the
+    // list up so the next item rises into the bar; turning up scrolls it down.
+    // A fast multi-detent spin still shows a single one-row slide for feedback.
+    int start_y = MENU_REST_Y + (delta > 0 ? 16 : -16);
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, menu_track_dark);  // anim identity; cb drives both tracks
+    lv_anim_set_exec_cb(&a, menu_track_y_cb);
+    lv_anim_set_values(&a, start_y, MENU_REST_Y);
+    lv_anim_set_duration(&a, 110);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+    lv_anim_start(&a);  // replaces any in-flight slide on this track
 }
 
 menu_action_t ui_menu_activate(void) {
