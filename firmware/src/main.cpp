@@ -397,7 +397,7 @@ void loop() {
             if (ui_menu_is_open() && millis() - menu_activity_ms >= MENU_TIMEOUT_MS)
                 ui_menu_close();
         } else {
-            if (delta)   brightness_adjust(delta);
+            if (delta)   { brightness_adjust(delta); ui_brightness_hud_show(brightness_get()); }
             if (clicked) { ui_menu_open(); menu_activity_ms = millis(); }
         }
     }

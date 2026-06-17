@@ -675,6 +675,52 @@ static void build_menu_overlay(lv_obj_t* parent) {
     lv_obj_add_flag(menu_overlay, LV_OBJ_FLAG_HIDDEN);  // opened by ui_menu_open()
 }
 
+// ---- Brightness HUD (tiny mono layout) ----
+// A transient full-screen overlay the encoder flashes while adjusting
+// brightness: a "Brightness" caption over a level bar. Each turn re-shows it
+// and re-arms a one-shot lv_timer that hides it after BRIGHT_HUD_MS of stillness.
+#define BRIGHT_HUD_MS 1200
+static lv_obj_t*  bright_hud   = nullptr;
+static lv_obj_t*  bright_bar   = nullptr;
+static lv_timer_t* bright_timer = nullptr;
+
+static void bright_hud_hide_cb(lv_timer_t* t) {
+    (void)t;
+    if (bright_hud) lv_obj_add_flag(bright_hud, LV_OBJ_FLAG_HIDDEN);
+    bright_timer = nullptr;  // one-shot — LVGL deletes it after this fires
+}
+
+static void build_brightness_hud(lv_obj_t* parent) {
+    bright_hud = lv_obj_create(parent);
+    lv_obj_set_size(bright_hud, L.scr_w, L.scr_h);
+    lv_obj_set_pos(bright_hud, 0, 0);
+    lv_obj_set_style_bg_color(bright_hud, COL_BG, 0);
+    lv_obj_set_style_bg_opa(bright_hud, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(bright_hud, 0, 0);
+    lv_obj_set_style_pad_all(bright_hud, 0, 0);
+    lv_obj_clear_flag(bright_hud, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* cap = tiny_label(bright_hud, 0, 2, "Brightness", COL_TEXT);
+    lv_obj_set_width(cap, L.scr_w);
+    lv_obj_set_style_text_align(cap, LV_TEXT_ALIGN_CENTER, 0);
+
+    bright_bar = lv_bar_create(bright_hud);
+    lv_obj_set_pos(bright_bar, 14, 20);
+    lv_obj_set_size(bright_bar, L.scr_w - 28, 8);
+    lv_bar_set_range(bright_bar, 0, 255);
+    lv_bar_set_value(bright_bar, 0, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(bright_bar, COL_BAR_BG, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(bright_bar, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_radius(bright_bar, 1, LV_PART_MAIN);
+    lv_obj_set_style_border_width(bright_bar, 1, LV_PART_MAIN);
+    lv_obj_set_style_border_color(bright_bar, COL_DIM, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(bright_bar, COL_TEXT, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_opa(bright_bar, LV_OPA_COVER, LV_PART_INDICATOR);
+    lv_obj_set_style_radius(bright_bar, 1, LV_PART_INDICATOR);
+
+    lv_obj_add_flag(bright_hud, LV_OBJ_FLAG_HIDDEN);  // shown by ui_brightness_hud_show()
+}
+
 static void init_usage_screen_tiny(lv_obj_t* scr) {
     usage_container = lv_obj_create(scr);
     lv_obj_set_size(usage_container, L.scr_w, L.scr_h);
@@ -701,6 +747,7 @@ static void init_usage_screen_tiny(lv_obj_t* scr) {
     // Settings menu overlay — created last so it sits above the usage rows and
     // the pair/idle overlays when opened.
     build_menu_overlay(usage_container);
+    build_brightness_hud(usage_container);
 
     // lbl_anim must exist (ui_tick_anim writes to it) but there's no room for
     // a status line on a 2-row 32px panel — keep it hidden.
@@ -1050,8 +1097,21 @@ void ui_update_ble_status(ble_state_t state, const char* name, const char* mac) 
 
 // ---- Encoder settings menu ----
 
+void ui_brightness_hud_show(uint8_t level) {
+    if (!bright_hud) return;
+    lv_bar_set_value(bright_bar, level, LV_ANIM_OFF);
+    lv_obj_clear_flag(bright_hud, LV_OBJ_FLAG_HIDDEN);
+    if (bright_timer) {
+        lv_timer_reset(bright_timer);  // keep it up while the knob keeps turning
+    } else {
+        bright_timer = lv_timer_create(bright_hud_hide_cb, BRIGHT_HUD_MS, nullptr);
+        lv_timer_set_repeat_count(bright_timer, 1);  // one-shot
+    }
+}
+
 void ui_menu_open(void) {
     if (!menu_overlay) return;
+    if (bright_hud) lv_obj_add_flag(bright_hud, LV_OBJ_FLAG_HIDDEN);  // HUD yields to menu
     menu_sel = 0;
     render_menu();
     lv_anim_delete(menu_track_dark, menu_track_y_cb);  // cancel any in-flight slide

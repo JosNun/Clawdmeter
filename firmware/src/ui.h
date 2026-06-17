@@ -33,3 +33,8 @@ void          ui_menu_close(void);       // hide it, back to the usage view
 bool          ui_menu_is_open(void);
 void          ui_menu_move(int delta);   // move selection by N detents (wraps)
 menu_action_t ui_menu_activate(void);    // action of the highlighted item
+
+// Transient brightness HUD: flash the current level (0..255) over the usage
+// view, auto-hiding after a short delay. Called as the encoder adjusts
+// brightness. No-op on layouts without the HUD.
+void          ui_brightness_hud_show(uint8_t level);
