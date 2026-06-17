@@ -639,21 +639,18 @@ static const struct {
     menu_action_t action;
 } MENU_ITEMS[] = {
     {"Refresh now",   MENU_ACT_REFRESH},
-    {"View",          MENU_ACT_MODE},     // label is overridden per current mode
+    {"Brightness",    MENU_ACT_BRIGHTNESS},
     {"Re-pair",       MENU_ACT_REPAIR},
     {"Sleep display", MENU_ACT_SLEEP},
     {"Back",          MENU_ACT_BACK},
 };
 #define MENU_COUNT ((int)(sizeof(MENU_ITEMS) / sizeof(MENU_ITEMS[0])))
 
-// Menu label for an item — usually static, but the "View" row reflects the mode
-// it will switch *to*, so a glance shows what activating it does.
-static int display_mode = MODE_INFO;  // defined here; full machinery is below
-static const char* menu_label_for(int idx) {
-    if (MENU_ITEMS[idx].action == MENU_ACT_MODE)
-        return display_mode == MODE_INFO ? "View: Playful" : "View: Info";
-    return MENU_ITEMS[idx].label;
-}
+// Declared here, ahead of all its users below: set by ui_mode_switch(), read by
+// usage_view_group() and the info-mode stroller gating. (Scene switching now
+// lives on the encoder, not a menu item — see main.cpp.)
+static int  display_mode = MODE_INFO;
+static bool mode_wipe_active = false;  // true while the scene carousel is sliding
 
 // Paint the 4-row window [menu_sel-1 .. menu_sel+2] (wrapping) into both copies.
 // Colors are fixed at build time (dark copy = bar text, light copy = dim text);
@@ -661,8 +658,8 @@ static const char* menu_label_for(int idx) {
 static void render_menu(void) {
     for (int i = 0; i < MENU_ROWS; i++) {
         int idx = (((menu_sel - 1 + i) % MENU_COUNT) + MENU_COUNT) % MENU_COUNT;
-        lv_label_set_text(menu_row_dark[i],  menu_label_for(idx));
-        lv_label_set_text(menu_row_light[i], menu_label_for(idx));
+        lv_label_set_text(menu_row_dark[i],  MENU_ITEMS[idx].label);
+        lv_label_set_text(menu_row_light[i], MENU_ITEMS[idx].label);
     }
 }
 
@@ -735,19 +732,12 @@ static void build_menu_overlay(lv_obj_t* parent) {
 }
 
 // ---- Brightness HUD (tiny mono layout) ----
-// A transient full-screen overlay the encoder flashes while adjusting
-// brightness: a "Brightness" caption over a level bar. Each turn re-shows it
-// and re-arms a one-shot lv_timer that hides it after BRIGHT_HUD_MS of stillness.
-#define BRIGHT_HUD_MS 1200
-static lv_obj_t*  bright_hud   = nullptr;
-static lv_obj_t*  bright_bar   = nullptr;
-static lv_timer_t* bright_timer = nullptr;
-
-static void bright_hud_hide_cb(lv_timer_t* t) {
-    (void)t;
-    if (bright_hud) lv_obj_add_flag(bright_hud, LV_OBJ_FLAG_HIDDEN);
-    bright_timer = nullptr;  // one-shot — LVGL deletes it after this fires
-}
+// A full-screen overlay shown while the menu's brightness-adjust sub-mode is
+// active: a "Brightness" caption over a level bar. It's sticky — shown on entry,
+// updated as the encoder turns, and explicitly hidden on click/timeout (the
+// controller in main.cpp owns that lifecycle).
+static lv_obj_t* bright_hud = nullptr;
+static lv_obj_t* bright_bar = nullptr;
 
 static void build_brightness_hud(lv_obj_t* parent) {
     bright_hud = lv_obj_create(parent);
@@ -821,7 +811,7 @@ static lv_obj_t*  playful_group    = nullptr;
 static lv_obj_t*  playful_water    = nullptr;  // full-panel canvas: sky+sun + dithered tide
 static lv_obj_t*  playful_creature = nullptr;  // floats on the surface
 static lv_obj_t*  playful_readout  = nullptr;  // tiny "S## W##" chip (black-backed)
-static uint32_t*  playful_water_buf = nullptr; // ARGB8888 canvas backing store
+static uint16_t*  playful_water_buf = nullptr; // OPAQUE RGB565 canvas backing store
 static int        playful_surface = 0;         // cached waterline y (flat baseline)
 static int        playful_weekly  = 0;         // cached weekly % (drives the sun)
 static uint8_t    playful_phase   = 0;         // ripple animation phase
@@ -845,10 +835,11 @@ static inline void playful_px(int x, int y) {
 //   • the session tide — a 1px bright waterline that ripples (phase shifts a
 //     traveling 1px crest) over a 50% checker body. A solid fill would light ~75%
 //     of the panel and swallow the white creature; the dither keeps it dim and
-//     readable. Empty cells stay transparent so the black background shows.
+//     readable. The canvas is OPAQUE (empty = black), so LVGL blits it without
+//     per-pixel alpha blending — much cheaper to composite during the carousel.
 static void playful_paint_scene(int surface, int weekly, uint8_t phase) {
     if (!playful_water) return;
-    lv_canvas_fill_bg(playful_water, lv_color_black(), LV_OPA_TRANSP);
+    lv_canvas_fill_bg(playful_water, lv_color_black(), LV_OPA_COVER);
 
     // Tide first — a rippling 1px waterline over a 50% checker body.
     if (surface < L.scr_h) {
@@ -897,9 +888,16 @@ static void playful_update(const UsageData* d) {
 }
 
 // Advance the waterline ripple. Cheap full-canvas repaint on a slow cadence,
-// only while the playful scene is actually on screen. Driven from ui_tick_anim().
+// only while the playful scene is the visible foreground — paused during the
+// carousel wipe and whenever the menu drawer is on screen (opening, open, OR
+// closing) so its full-canvas invalidation doesn't pile onto those slides.
+// (Gating on ui_menu_is_open() would miss the close: it reports false the
+// instant the close starts, which is exactly when the tide is being revealed.)
+// Driven from ui_tick_anim().
 static void playful_tick(void) {
     if (!playful_group || !lv_obj_is_visible(playful_group)) return;
+    if (mode_wipe_active) return;
+    if (menu_overlay && !lv_obj_has_flag(menu_overlay, LV_OBJ_FLAG_HIDDEN)) return;
     uint32_t now = lv_tick_get();
     if (now - playful_ripple_ms < PLAYFUL_RIPPLE_MS) return;
     playful_ripple_ms = now;
@@ -917,13 +915,15 @@ static void build_playful_group_tiny(lv_obj_t* parent) {
     lv_obj_set_style_pad_all(playful_group, 0, 0);
     lv_obj_clear_flag(playful_group, LV_OBJ_FLAG_SCROLLABLE);
 
-    // The scene is a full-panel ARGB canvas (transparent where empty); painted by
-    // playful_paint_scene() as a dithered tide + sun so it never washes out the panel.
-    playful_water_buf = (uint32_t*)malloc((size_t)L.scr_w * L.scr_h * 4);
+    // The scene is a full-panel OPAQUE RGB565 canvas (black where empty); painted
+    // by playful_paint_scene() as a dithered tide + sun. Opaque (not ARGB) so the
+    // compositor blits it instead of alpha-blending every pixel each frame —
+    // that's what made the stats↔tide carousel chug. Half the buffer, too.
+    playful_water_buf = (uint16_t*)malloc((size_t)L.scr_w * L.scr_h * 2);
     if (playful_water_buf) {
         playful_water = lv_canvas_create(playful_group);
         lv_canvas_set_buffer(playful_water, playful_water_buf, L.scr_w, L.scr_h,
-                             LV_COLOR_FORMAT_ARGB8888);
+                             LV_COLOR_FORMAT_RGB565);
         lv_obj_set_pos(playful_water, 0, 0);
         playful_surface = L.scr_h;       // start empty
         playful_paint_scene(playful_surface, 0, 0);
@@ -1220,6 +1220,11 @@ static void view_anim_x_cb(void* obj, int32_t x) {
     lv_obj_set_x((lv_obj_t*)obj, (int)x);
 }
 
+// Vertical variant — used by the settings menu, which rises from the bottom.
+static void view_anim_y_cb(void* obj, int32_t y) {
+    lv_obj_set_y((lv_obj_t*)obj, (int)y);
+}
+
 static void view_slide_out_done(lv_anim_t* a) {
     lv_obj_t* g = (lv_obj_t*)a->var;
     lv_obj_add_flag(g, LV_OBJ_FLAG_HIDDEN);
@@ -1237,6 +1242,21 @@ static void view_slide(lv_obj_t* g, int from, int to, bool hide_when_done) {
     lv_anim_set_path_cb(&a, lv_anim_path_ease_in_out);
     if (hide_when_done) lv_anim_set_completed_cb(&a, view_slide_out_done);
     lv_anim_start(&a);  // replaces any in-flight slide on this group
+}
+
+// ---- Scene-switch carousel (info ↔ playful) ----
+// The two usage representations push across together with a springy overshoot.
+// While the wipe is in flight, update_view_state() must NOT force-hide the
+// outgoing scene (it counts as the "inactive" rep once display_mode flips), so a
+// flag pauses that housekeeping until the outgoing slide finishes.
+// (mode_wipe_active is declared up by display_mode — playful_tick reads it too.)
+#define MODE_WIPE_MS 340
+
+static void mode_wipe_done(lv_anim_t* a) {
+    lv_obj_t* g = (lv_obj_t*)a->var;
+    lv_obj_add_flag(g, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_x(g, 0);
+    mode_wipe_active = false;
 }
 
 // ---- Usage-view stroller motion ----
@@ -1360,9 +1380,10 @@ static void update_view_state(void) {
     } else {
         v = 1;  // idle / Zzz
     }
-    // The inactive usage representation (the mode we're not in) must never show.
+    // The inactive usage representation (the mode we're not in) must never show —
+    // but leave it alone mid-carousel, where it's the outgoing scene still sliding.
     lv_obj_t* active_usage = usage_view_group();
-    if (playful_group) {
+    if (playful_group && !mode_wipe_active) {
         lv_obj_t* inactive = (active_usage == usage_group) ? playful_group : usage_group;
         lv_anim_delete(inactive, view_anim_x_cb);
         lv_obj_set_x(inactive, 0);
@@ -1554,14 +1575,17 @@ display_mode_t ui_mode_get(void) {
     return (display_mode_t)display_mode;
 }
 
-// Advance to the next display mode. If the live usage view is on screen (and not
-// hidden behind the open menu), wipe between the two representations the same way
-// we wipe between view-states; otherwise just swap visibility so the correct one
-// is revealed when the usage view next appears.
-void ui_mode_cycle(void) {
-    if (!playful_group) return;  // no playful face on this layout — no-op
+// Switch the display mode (the encoder does this on the home screen). The sign
+// of `delta` drives a carousel-style horizontal wipe: turning one way slides the
+// next scene in from the right, the other way from the left. If the live usage
+// view is on screen the two representations wipe across; otherwise the swap is
+// silent and update_view_state() reveals the right one when the view returns.
+void ui_mode_switch(int delta) {
+    if (!playful_group || delta == 0) return;  // no playful face here — no-op
+    int step = (delta > 0) ? 1 : -1;
     int old_mode = display_mode;
-    display_mode = (display_mode + 1) % MODE_COUNT;
+    display_mode = ((display_mode + step) % MODE_COUNT + MODE_COUNT) % MODE_COUNT;
+    if (display_mode == old_mode) return;       // single mode → nothing to do
     if (have_last) playful_update(&last_data);  // freshen the incoming scene
 
     lv_obj_t* ng = usage_view_group();
@@ -1575,13 +1599,33 @@ void ui_mode_cycle(void) {
     if (on_usage && !occluded) {
         lv_anim_delete(og, view_anim_x_cb);
         lv_anim_delete(ng, view_anim_x_cb);
-        lv_obj_set_x(og, 0);
-        lv_obj_set_x(ng, 0);
-        int dir = (display_mode > old_mode) ? 1 : -1;  // playful sits "after" info
-        view_slide(ng, dir * L.scr_w, 0,        false);
-        view_slide(og, 0,            -dir * L.scr_w, true);
+        lv_obj_clear_flag(og, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(ng, LV_OBJ_FLAG_HIDDEN);
+        mode_wipe_active = true;
+
+        // Both panels ride the same springy overshoot, staying edge-to-edge, so
+        // the pair slides in and settles with a little bounce (a real carousel,
+        // not a fade). The outgoing one carries the done-cb that ends the wipe.
+        lv_anim_t a;
+        lv_anim_init(&a);
+        lv_anim_set_var(&a, ng);
+        lv_anim_set_exec_cb(&a, view_anim_x_cb);
+        lv_anim_set_values(&a, step * L.scr_w, 0);          // incoming from the turn side
+        lv_anim_set_duration(&a, MODE_WIPE_MS);
+        lv_anim_set_path_cb(&a, lv_anim_path_overshoot);
+        lv_anim_start(&a);
+
+        lv_anim_init(&a);
+        lv_anim_set_var(&a, og);
+        lv_anim_set_exec_cb(&a, view_anim_x_cb);
+        lv_anim_set_values(&a, 0, -step * L.scr_w);         // outgoing the other way
+        lv_anim_set_duration(&a, MODE_WIPE_MS);
+        lv_anim_set_path_cb(&a, lv_anim_path_overshoot);
+        lv_anim_set_completed_cb(&a, mode_wipe_done);
+        lv_anim_start(&a);
     } else if (on_usage) {
         // Hidden swap behind the menu: snap so the reveal shows the new mode.
+        mode_wipe_active = false;
         lv_obj_add_flag(og, LV_OBJ_FLAG_HIDDEN);
         lv_obj_set_x(ng, 0);
         lv_obj_clear_flag(ng, LV_OBJ_FLAG_HIDDEN);
@@ -1600,21 +1644,19 @@ void ui_brightness_hud_show(uint8_t level) {
     if (!bright_hud) return;
     lv_bar_set_value(bright_bar, level, LV_ANIM_OFF);
     lv_obj_clear_flag(bright_hud, LV_OBJ_FLAG_HIDDEN);
-    if (bright_timer) {
-        lv_timer_reset(bright_timer);  // keep it up while the knob keeps turning
-    } else {
-        bright_timer = lv_timer_create(bright_hud_hide_cb, BRIGHT_HUD_MS, nullptr);
-        lv_timer_set_repeat_count(bright_timer, 1);  // one-shot
-    }
 }
 
-// The menu is a modal panel: opening slides it in from the right over the
-// (static) usage view; closing slides it back out to the right, revealing the
-// view underneath. Reuses the view-wipe cb/duration so the motion matches.
+void ui_brightness_hud_hide(void) {
+    if (bright_hud) lv_obj_add_flag(bright_hud, LV_OBJ_FLAG_HIDDEN);
+}
+
+// The menu is a modal panel that rises from the bottom over the (static) usage
+// view and drops back down to reveal it. Vertical motion (y), so it reads as a
+// distinct "drawer" rather than another horizontal scene wipe.
 static void menu_close_done(lv_anim_t* a) {
     (void)a;
     lv_obj_add_flag(menu_overlay, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_set_x(menu_overlay, 0);  // park at rest for the next open
+    lv_obj_set_y(menu_overlay, 0);  // park at rest for the next open
     menu_closing = false;
 }
 
@@ -1626,9 +1668,18 @@ void ui_menu_open(void) {
     render_menu();
     lv_anim_delete(menu_track_dark, menu_track_y_cb);  // reset internal scroll
     menu_track_y_cb(nullptr, MENU_REST_Y);
-    lv_anim_delete(menu_overlay, view_anim_x_cb);       // cancel any close slide
+    lv_anim_delete(menu_overlay, view_anim_y_cb);       // cancel any close slide
+    lv_obj_set_y(menu_overlay, L.scr_h);                // start just below the screen
     lv_obj_clear_flag(menu_overlay, LV_OBJ_FLAG_HIDDEN);
-    view_slide(menu_overlay, L.scr_w, 0, false);        // slide in from the right
+    // Rise up from the bottom.
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, menu_overlay);
+    lv_anim_set_exec_cb(&a, view_anim_y_cb);
+    lv_anim_set_values(&a, L.scr_h, 0);
+    lv_anim_set_duration(&a, VIEW_WIPE_MS);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+    lv_anim_start(&a);
 }
 
 void ui_menu_close(void) {
@@ -1636,15 +1687,15 @@ void ui_menu_close(void) {
     if (lv_obj_has_flag(menu_overlay, LV_OBJ_FLAG_HIDDEN)) return;  // already closed
     menu_closing = true;
     lv_anim_delete(menu_track_dark, menu_track_y_cb);   // stop internal scroll
-    lv_anim_delete(menu_overlay, view_anim_x_cb);       // cancel open slide if mid-flight
-    // Slide out to the right from wherever it is, then hide via menu_close_done.
+    lv_anim_delete(menu_overlay, view_anim_y_cb);       // cancel open slide if mid-flight
+    // Drop back down off the bottom from wherever it is, then hide.
     lv_anim_t a;
     lv_anim_init(&a);
     lv_anim_set_var(&a, menu_overlay);
-    lv_anim_set_exec_cb(&a, view_anim_x_cb);
-    lv_anim_set_values(&a, lv_obj_get_x(menu_overlay), L.scr_w);
+    lv_anim_set_exec_cb(&a, view_anim_y_cb);
+    lv_anim_set_values(&a, lv_obj_get_y(menu_overlay), L.scr_h);
     lv_anim_set_duration(&a, VIEW_WIPE_MS);
-    lv_anim_set_path_cb(&a, lv_anim_path_ease_in_out);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_in);
     lv_anim_set_completed_cb(&a, menu_close_done);
     lv_anim_start(&a);
 }

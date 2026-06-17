@@ -24,6 +24,11 @@ bool SSD1306::begin(void) {
     }
     if (!addr_) return false;
 
+    // Grow the Wire TX buffer so flush() can stream the framebuffer in big
+    // chunks (default is 128 B). Bigger transactions = far less per-frame I2C
+    // overhead, which is what keeps animation fluid.
+    Wire.setBufferSize(256);
+
     // Standard 128x32 init sequence.
     static const uint8_t init_seq[] = {
         0xAE,               // display off
@@ -73,16 +78,19 @@ void SSD1306::flush(void) {
     cmd(0x21); cmd(0x00); cmd(SSD1306_W - 1);   // column range
     cmd(0x22); cmd(0x00); cmd((SSD1306_H / 8) - 1);  // page range
 
-    // Stream the framebuffer in chunks that fit the Wire TX buffer
-    // (control byte + 16 data bytes per transaction is safely small).
+    // Stream the framebuffer in large chunks (one control byte + up to CHUNK
+    // data bytes per transaction). The whole 512 B panel goes out in ~4
+    // transactions instead of 32 — minimal start/stop/address overhead.
     const int total = sizeof(fb_);
+    const int CHUNK = 128;          // control byte + CHUNK <= Wire buffer (256)
     int i = 0;
     while (i < total) {
+        int n = (total - i < CHUNK) ? (total - i) : CHUNK;
         Wire.beginTransmission(addr_);
         Wire.write(CTRL_DATA);
-        int n = 0;
-        while (n < 16 && i < total) { Wire.write(fb_[i++]); n++; }
+        Wire.write(&fb_[i], n);
         Wire.endTransmission();
+        i += n;
     }
 }
 

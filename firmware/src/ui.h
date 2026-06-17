@@ -22,11 +22,11 @@ void ui_update_battery(int percent, bool charging);
 // effect so ble/idle/brightness deps stay out of the UI layer.
 typedef enum {
     MENU_ACT_NONE = 0,
-    MENU_ACT_REFRESH,    // ask the daemon to poll now
-    MENU_ACT_MODE,       // cycle the display mode (info ↔ playful)
-    MENU_ACT_REPAIR,     // clear BLE bonds and re-advertise
-    MENU_ACT_SLEEP,      // blank the display until the next interaction
-    MENU_ACT_BACK,       // close the menu, no-op
+    MENU_ACT_REFRESH,     // ask the daemon to poll now
+    MENU_ACT_BRIGHTNESS,  // enter the brightness-adjust sub-mode (rotate to set)
+    MENU_ACT_REPAIR,      // clear BLE bonds and re-advertise
+    MENU_ACT_SLEEP,       // blank the display until the next interaction
+    MENU_ACT_BACK,        // close the menu, no-op
 } menu_action_t;
 
 void          ui_menu_open(void);        // show the overlay (no-op if unsupported)
@@ -35,10 +35,12 @@ bool          ui_menu_is_open(void);
 void          ui_menu_move(int delta);   // move selection by N detents (wraps)
 menu_action_t ui_menu_activate(void);    // action of the highlighted item
 
-// Transient brightness HUD: flash the current level (0..255) over the usage
-// view, auto-hiding after a short delay. Called as the encoder adjusts
-// brightness. No-op on layouts without the HUD.
+// Brightness HUD: show the current level (0..255) over the usage view while the
+// menu's brightness-adjust sub-mode is active. It's sticky — call
+// ui_brightness_hud_hide() to dismiss it (on click/timeout). No-op on layouts
+// without the HUD.
 void          ui_brightness_hud_show(uint8_t level);
+void          ui_brightness_hud_hide(void);
 
 // Branded boot greeting: a creature + wordmark shown briefly at startup, then
 // it wipes away to reveal the usage view. Call once from setup(). No-op on
@@ -56,7 +58,7 @@ typedef enum {
     MODE_COUNT,
 } display_mode_t;
 
-void           ui_mode_cycle(void);   // advance to the next display mode (wraps)
+void           ui_mode_switch(int delta);  // switch scene; sign sets the wipe direction
 display_mode_t ui_mode_get(void);
 
 // Notify the UI that a refresh was requested (e.g. the menu's "Refresh now"),

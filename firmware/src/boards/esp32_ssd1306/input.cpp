@@ -21,8 +21,20 @@ static const int8_t ENC_TABLE[16] = {
     0,  1, -1,  0,
 };
 
-static volatile int32_t enc_accum   = 0;  // raw sub-steps since last delta()
-static volatile uint8_t enc_prev_ab = 0;  // last (A<<1|B)
+static volatile int32_t  enc_accum   = 0;  // raw sub-steps since last delta()
+static volatile uint8_t  enc_prev_ab = 0;  // last (A<<1|B)
+
+// Click is latched in an ISR via a debounced press/release state machine, not
+// polled. The old polled debouncer needed the loop to sample the switch ≥25 ms
+// into a still-held press; the playful tide's repaints open polling gaps that
+// swallowed quick taps (a long press still worked). An ISR captures the press
+// instantly regardless of render load — but it must reject contact bounce on
+// BOTH edges and require a clean release before the next press, or release
+// bounce double-fires (menu reopening, phantom item activations).
+static volatile bool     enc_click_pending = false;  // one-shot, consumed by clicked()
+static volatile bool     enc_sw_down = false;        // debounced logical state
+static volatile uint32_t enc_sw_last_ms = 0;         // time of last accepted edge
+#define ENC_SW_DEBOUNCE_MS 20
 
 static void IRAM_ATTR enc_isr(void) {
     uint8_t a = (uint8_t)digitalRead(ENC_PIN_A);
@@ -33,6 +45,16 @@ static void IRAM_ATTR enc_isr(void) {
     enc_prev_ab = ab;
 }
 
+static void IRAM_ATTR enc_sw_isr(void) {
+    uint32_t now = millis();
+    if (now - enc_sw_last_ms < ENC_SW_DEBOUNCE_MS) return;  // within a settling window → bounce
+    bool low = (digitalRead(ENC_PIN_SW) == LOW);            // active-low: LOW = pressed
+    if (low == enc_sw_down) return;                         // no real state change
+    enc_sw_last_ms = now;
+    enc_sw_down = low;
+    if (low) enc_click_pending = true;                      // latch one click per press edge
+}
+
 void input_hal_init(void) {
     pinMode(ENC_PIN_A, INPUT_PULLUP);
     pinMode(ENC_PIN_B, INPUT_PULLUP);
@@ -40,8 +62,10 @@ void input_hal_init(void) {
 
     enc_prev_ab = (uint8_t)((digitalRead(ENC_PIN_A) << 1) | digitalRead(ENC_PIN_B));
     enc_accum = 0;
+    enc_sw_down = (digitalRead(ENC_PIN_SW) == LOW);  // seed the debounced state
     attachInterrupt(digitalPinToInterrupt(ENC_PIN_A), enc_isr, CHANGE);
     attachInterrupt(digitalPinToInterrupt(ENC_PIN_B), enc_isr, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(ENC_PIN_SW), enc_sw_isr, CHANGE);  // both edges
 }
 
 bool input_hal_is_held(InputButton btn) {
@@ -64,23 +88,13 @@ int input_hal_encoder_delta(void) {
 }
 
 bool input_hal_encoder_clicked(void) {
-    // Debounced press-edge detector. Polled every loop (~5 ms); a 25 ms stable
-    // window rejects contact bounce. Active-low (switch leg to GND).
-    static bool     stable_pressed = false;
-    static bool     last_raw       = false;
-    static uint32_t last_change_ms = 0;
-
-    bool raw = (digitalRead(ENC_PIN_SW) == LOW);
-    uint32_t now = millis();
-    if (raw != last_raw) {
-        last_raw = raw;
-        last_change_ms = now;
-    }
-    if ((now - last_change_ms) >= 25 && raw != stable_pressed) {
-        stable_pressed = raw;
-        if (stable_pressed) return true;   // fire once on the press edge
-    }
-    return false;
+    // Consume the press latched by enc_sw_isr(). Independent of loop timing, so
+    // a quick tap is never missed even while the render loop is busy.
+    noInterrupts();
+    bool clicked = enc_click_pending;
+    enc_click_pending = false;
+    interrupts();
+    return clicked;
 }
 
 void input_hal_encoder_debug(void) {

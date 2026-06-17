@@ -221,13 +221,19 @@ void setup() {
     lv_init();
     lv_tick_set_cb(my_tick);
 
-    buf1 = (uint16_t*)heap_caps_malloc(W * BUF_LINES * 2, LV_BUF_CAPS);
-    buf2 = (uint16_t*)heap_caps_malloc(W * BUF_LINES * 2, LV_BUF_CAPS);
+    // Partial-render strip height. Small mono panels (e.g. 128x32) use the FULL
+    // height so a whole-screen redraw is a single strip → a single flush per
+    // frame — the big lever for smooth animation over slow I2C. Larger panels
+    // keep the modest BUF_LINES strip to bound SRAM/PSRAM use.
+    const int    buf_lines = (H <= 64) ? H : BUF_LINES;
+    const size_t buf_bytes = (size_t)W * buf_lines * 2;
+    buf1 = (uint16_t*)heap_caps_malloc(buf_bytes, LV_BUF_CAPS);
+    buf2 = (uint16_t*)heap_caps_malloc(buf_bytes, LV_BUF_CAPS);
 
     lv_display_t* disp = lv_display_create(W, H);
     lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB565);
     lv_display_set_flush_cb(disp, my_flush_cb);
-    lv_display_set_buffers(disp, buf1, buf2, W * BUF_LINES * 2,
+    lv_display_set_buffers(disp, buf1, buf2, buf_bytes,
                            LV_DISPLAY_RENDER_MODE_PARTIAL);
     lv_display_add_event_cb(disp, rounder_cb, LV_EVENT_INVALIDATE_AREA, NULL);
 
@@ -363,13 +369,16 @@ void loop() {
     }
 
     // ---- Rotary encoder (boards that have one) ----
-    //   turn (usage view) → adjust brightness
+    //   turn (usage view) → switch scene (info ↔ playful), animated carousel wipe
     //   click             → open the settings menu
     //   turn / click (menu) → move selection / activate the highlighted item
+    //   turn / click (brightness sub-mode) → adjust level / confirm and exit
     // The first interaction from sleep just wakes the panel (swallowed), like
-    // the buttons. The menu auto-closes after a few seconds of inactivity.
+    // the buttons. The menu and brightness sub-mode auto-close after a few
+    // seconds of inactivity.
     if (board_caps().has_encoder) {
         static uint32_t menu_activity_ms = 0;
+        static bool     adjusting_brightness = false;
         const uint32_t  MENU_TIMEOUT_MS = 6000;
 
         int  delta   = input_hal_encoder_delta();
@@ -381,25 +390,33 @@ void loop() {
             clicked = false;
         }
 
-        if (ui_menu_is_open()) {
+        if (adjusting_brightness) {
+            if (delta)   { brightness_adjust(delta); ui_brightness_hud_show(brightness_get());
+                           menu_activity_ms = millis(); }
+            if (clicked || millis() - menu_activity_ms >= MENU_TIMEOUT_MS) {
+                adjusting_brightness = false;
+                ui_brightness_hud_hide();
+            }
+        } else if (ui_menu_is_open()) {
             if (delta)   { ui_menu_move(delta); menu_activity_ms = millis(); }
             if (clicked) {
                 menu_action_t act = ui_menu_activate();
                 switch (act) {
-                case MENU_ACT_REFRESH: ble_request_refresh(); ui_refresh_requested(); break;
-                case MENU_ACT_MODE:    ui_mode_cycle();        break;
-                case MENU_ACT_REPAIR:  ble_clear_bonds();      break;
-                case MENU_ACT_SLEEP:   ui_menu_close(); idle_force_sleep(); break;
+                case MENU_ACT_REFRESH:    ble_request_refresh(); ui_refresh_requested(); break;
+                case MENU_ACT_BRIGHTNESS: adjusting_brightness = true; ui_menu_close();
+                                          ui_brightness_hud_show(brightness_get()); break;
+                case MENU_ACT_REPAIR:     ble_clear_bonds(); break;
+                case MENU_ACT_SLEEP:      ui_menu_close(); idle_force_sleep(); break;
                 case MENU_ACT_BACK:
-                case MENU_ACT_NONE:    break;
+                case MENU_ACT_NONE:       break;
                 }
-                if (act != MENU_ACT_SLEEP) ui_menu_close();
+                if (act != MENU_ACT_SLEEP && act != MENU_ACT_BRIGHTNESS) ui_menu_close();
                 menu_activity_ms = millis();
             }
             if (ui_menu_is_open() && millis() - menu_activity_ms >= MENU_TIMEOUT_MS)
                 ui_menu_close();
         } else {
-            if (delta)   { brightness_adjust(delta); ui_brightness_hud_show(brightness_get()); }
+            if (delta)   { ui_mode_switch(delta); }   // home screen: rotate = switch scene
             if (clicked) { ui_menu_open(); menu_activity_ms = millis(); }
         }
     }
