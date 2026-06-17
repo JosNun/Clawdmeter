@@ -555,6 +555,17 @@ static lv_obj_t* make_tiny_overlay(lv_obj_t* parent, const char* text) {
     return g;
 }
 
+// Usage-view "stroller": a claudepix creature that occasionally hops across the
+// usage rows and off the other side. Its canvas is an opaque 20×20 block (white
+// creature on true-black), so it cleanly occludes the stats as it passes and
+// they restore perfectly once it leaves — no permanent space given up. Parented
+// in usage_group (so it only shows on the usage view and rides the view wipe);
+// motion + retrigger live near the view-animation helpers below.
+static lv_obj_t* walker = nullptr;
+static bool      walker_active = false;
+static uint32_t  walker_last_ms = 0;
+#define WALKER_INTERVAL_MS 180000   // ~3 min of usage view between strolls
+
 // The idle ("connected, data went stale") overlay: a small blinking claudepix
 // creature on the left with the status caption beside it. Opaque so it covers
 // the usage rows cleanly during the view wipe. The creature animates via
@@ -798,6 +809,13 @@ static void init_usage_screen_tiny(lv_obj_t* scr) {
 
     make_tiny_row(usage_group, 0,  "S", &lbl_session_pct, &bar_session, &lbl_session_reset);
     make_tiny_row(usage_group, 16, "W", &lbl_weekly_pct,  &bar_weekly,  &lbl_weekly_reset);
+
+    // Occasional hop-across creature, on top of the rows, parked off-screen.
+    walker = splash_mini_create(usage_group, "dance bounce", 20);
+    if (walker) {
+        lv_obj_set_pos(walker, L.scr_w, 6);  // off the right edge; y centres 20px in 32
+        lv_obj_add_flag(walker, LV_OBJ_FLAG_HIDDEN);
+    }
 
     pair_group = make_tiny_overlay(usage_container, "Waiting for host\xE2\x80\xA6");
     idle_group = build_idle_creature_tiny(usage_container);
@@ -1051,6 +1069,54 @@ static void view_slide(lv_obj_t* g, int from, int to, bool hide_when_done) {
     lv_anim_start(&a);  // replaces any in-flight slide on this group
 }
 
+// ---- Usage-view stroller motion ----
+// Hop in from the right to centre, pause (bouncing in place), then hop off the
+// left. Reuses view_anim_x_cb to drive the creature's x.
+#define WALKER_HOP_MS    1300
+#define WALKER_PAUSE_MS  1200
+
+static void walker_done(lv_anim_t* a) {
+    (void)a;
+    if (walker) {
+        lv_obj_add_flag(walker, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_x(walker, L.scr_w);  // re-park off the right
+    }
+    walker_active = false;
+}
+
+static void walker_exit(lv_anim_t* a) {
+    (void)a;
+    if (!walker) return;
+    int center = (L.scr_w - 20) / 2;
+    lv_anim_t e;
+    lv_anim_init(&e);
+    lv_anim_set_var(&e, walker);
+    lv_anim_set_exec_cb(&e, view_anim_x_cb);
+    lv_anim_set_values(&e, center, -20);
+    lv_anim_set_duration(&e, WALKER_HOP_MS);
+    lv_anim_set_delay(&e, WALKER_PAUSE_MS);   // dwell at centre before leaving
+    lv_anim_set_path_cb(&e, lv_anim_path_ease_in);
+    lv_anim_set_completed_cb(&e, walker_done);
+    lv_anim_start(&e);
+}
+
+static void walker_start(void) {
+    if (!walker || walker_active) return;
+    walker_active = true;
+    int center = (L.scr_w - 20) / 2;
+    lv_obj_set_x(walker, L.scr_w);
+    lv_obj_clear_flag(walker, LV_OBJ_FLAG_HIDDEN);
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, walker);
+    lv_anim_set_exec_cb(&a, view_anim_x_cb);
+    lv_anim_set_values(&a, L.scr_w, center);
+    lv_anim_set_duration(&a, WALKER_HOP_MS);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+    lv_anim_set_completed_cb(&a, walker_exit);  // chain: enter → pause → exit
+    lv_anim_start(&a);
+}
+
 static void update_view_state(void) {
     if (!usage_group || !pair_group || !idle_group) return;
     int v;
@@ -1098,6 +1164,13 @@ void ui_tick_anim(void) {
     if (current_screen != SCREEN_USAGE) return;
     update_view_state();
     splash_mini_tick();   // advance every embedded creature; hidden ones self-skip
+
+    // Occasionally send the stroller across the live usage view.
+    if (walker && view_state == 2 && !walker_active &&
+        lv_tick_get() - walker_last_ms > WALKER_INTERVAL_MS) {
+        walker_last_ms = lv_tick_get();
+        walker_start();
+    }
 
     uint32_t now = lv_tick_get();
 
