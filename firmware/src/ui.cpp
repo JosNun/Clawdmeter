@@ -1068,7 +1068,7 @@ static void update_view_state(void) {
 void ui_tick_anim(void) {
     if (current_screen != SCREEN_USAGE) return;
     update_view_state();
-    if (view_state == 1) splash_mini_tick();   // animate the sleeping creature on the idle screen
+    splash_mini_tick();   // advance every embedded creature; hidden ones self-skip
 
     uint32_t now = lv_tick_get();
 
