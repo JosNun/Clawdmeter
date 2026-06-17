@@ -38,3 +38,8 @@ menu_action_t ui_menu_activate(void);    // action of the highlighted item
 // view, auto-hiding after a short delay. Called as the encoder adjusts
 // brightness. No-op on layouts without the HUD.
 void          ui_brightness_hud_show(uint8_t level);
+
+// Branded boot greeting: a creature + wordmark shown briefly at startup, then
+// it wipes away to reveal the usage view. Call once from setup(). No-op on
+// layouts without it (e.g. AMOLED boards, which have their own splash).
+void          ui_boot_greeting_show(void);

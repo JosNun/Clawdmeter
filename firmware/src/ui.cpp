@@ -751,6 +751,34 @@ static void build_brightness_hud(lv_obj_t* parent) {
     lv_obj_add_flag(bright_hud, LV_OBJ_FLAG_HIDDEN);  // shown by ui_brightness_hud_show()
 }
 
+// ---- Boot greeting (tiny mono layout) ----
+// A branded startup splash: a winking creature beside the "Clawdmeter"
+// wordmark. Shown opaque over the view at boot, then wiped away by
+// ui_boot_greeting_show()'s timer to reveal whatever view-state resolved
+// underneath. A second mini-creature instance alongside the idle one — only
+// possible since the mini engine became multi-instance.
+static lv_obj_t* boot_group = nullptr;
+#define BOOT_GREET_MS 1800
+
+static void build_boot_greeting(lv_obj_t* parent) {
+    boot_group = lv_obj_create(parent);
+    lv_obj_set_size(boot_group, L.scr_w, L.scr_h);
+    lv_obj_set_pos(boot_group, 0, 0);
+    lv_obj_set_style_bg_color(boot_group, COL_BG, 0);
+    lv_obj_set_style_bg_opa(boot_group, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(boot_group, 0, 0);
+    lv_obj_set_style_pad_all(boot_group, 0, 0);
+    lv_obj_clear_flag(boot_group, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* creature = splash_mini_create(boot_group, "expression wink", 20);
+    if (creature) lv_obj_align(creature, LV_ALIGN_LEFT_MID, 4, 0);
+
+    lv_obj_t* cap = tiny_label(boot_group, 0, 0, "Clawdmeter", COL_TEXT);
+    lv_obj_align(cap, LV_ALIGN_CENTER, 12, 0);  // centered in the space right of the creature
+
+    lv_obj_add_flag(boot_group, LV_OBJ_FLAG_HIDDEN);  // shown by ui_boot_greeting_show()
+}
+
 static void init_usage_screen_tiny(lv_obj_t* scr) {
     usage_container = lv_obj_create(scr);
     lv_obj_set_size(usage_container, L.scr_w, L.scr_h);
@@ -778,6 +806,7 @@ static void init_usage_screen_tiny(lv_obj_t* scr) {
     // the pair/idle overlays when opened.
     build_menu_overlay(usage_container);
     build_brightness_hud(usage_container);
+    build_boot_greeting(usage_container);  // created last → on top at boot
 
     // lbl_anim must exist (ui_tick_anim writes to it) but there's no room for
     // a status line on a 2-row 32px panel — keep it hidden.
@@ -1184,6 +1213,35 @@ void ui_update_ble_status(ble_state_t state, const char* name, const char* mac) 
 }
 
 // ---- Encoder settings menu ----
+
+static void boot_greet_done(lv_anim_t* a) {
+    (void)a;
+    lv_obj_add_flag(boot_group, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_x(boot_group, 0);
+}
+
+static void boot_greet_dismiss_cb(lv_timer_t* t) {
+    (void)t;
+    if (!boot_group) return;
+    // Wipe out to the left, revealing whatever view-state resolved underneath.
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, boot_group);
+    lv_anim_set_exec_cb(&a, view_anim_x_cb);
+    lv_anim_set_values(&a, 0, -L.scr_w);
+    lv_anim_set_duration(&a, VIEW_WIPE_MS);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_in_out);
+    lv_anim_set_completed_cb(&a, boot_greet_done);
+    lv_anim_start(&a);
+}
+
+void ui_boot_greeting_show(void) {
+    if (!boot_group) return;
+    lv_obj_set_x(boot_group, 0);
+    lv_obj_clear_flag(boot_group, LV_OBJ_FLAG_HIDDEN);
+    lv_timer_t* t = lv_timer_create(boot_greet_dismiss_cb, BOOT_GREET_MS, nullptr);
+    lv_timer_set_repeat_count(t, 1);  // one-shot: dismiss after the greeting
+}
 
 void ui_brightness_hud_show(uint8_t level) {
     if (!bright_hud) return;
