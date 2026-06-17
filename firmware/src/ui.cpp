@@ -555,6 +555,35 @@ static lv_obj_t* make_tiny_overlay(lv_obj_t* parent, const char* text) {
     return g;
 }
 
+// The idle ("connected, data went stale") overlay: a small blinking claudepix
+// creature on the left with the status caption beside it. Opaque so it covers
+// the usage rows cleanly during the view wipe. The creature animates via
+// splash_mini_tick(), already driven from ui_tick_anim() when view_state==idle.
+// A 20px (1-cell) creature is the only size that fits the 32px-tall panel.
+//
+// "idle blink" (not "expression sleep") because the sleeping creature is a
+// solid silhouette — none of its frames use the dark eye color — whereas the
+// blinking one has black eyes that survive the 1-bit threshold.
+static lv_obj_t* build_idle_creature_tiny(lv_obj_t* parent) {
+    lv_obj_t* g = lv_obj_create(parent);
+    lv_obj_set_size(g, L.scr_w, L.scr_h);
+    lv_obj_set_pos(g, 0, 0);
+    lv_obj_set_style_bg_color(g, COL_BG, 0);
+    lv_obj_set_style_bg_opa(g, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(g, 0, 0);
+    lv_obj_set_style_pad_all(g, 0, 0);
+    lv_obj_clear_flag(g, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* creature = splash_mini_create(g, "idle blink", 20);
+    if (creature) lv_obj_align(creature, LV_ALIGN_LEFT_MID, 4, 0);
+
+    lv_obj_t* cap = tiny_label(g, 0, 0, "No data", COL_TEXT);  // no "…": styrene_12 lacks the glyph
+    lv_obj_align(cap, LV_ALIGN_CENTER, 12, 0);  // centered in the space right of the creature
+
+    lv_obj_add_flag(g, LV_OBJ_FLAG_HIDDEN);  // update_view_state decides
+    return g;
+}
+
 // ---- Encoder settings menu (tiny mono layout) ----
 // A full-screen opaque overlay over the usage view. Only two 16px rows fit on a
 // 32px panel, so we show a 2-item window: the selected item highlighted by a
@@ -743,7 +772,7 @@ static void init_usage_screen_tiny(lv_obj_t* scr) {
     make_tiny_row(usage_group, 16, "W", &lbl_weekly_pct,  &bar_weekly,  &lbl_weekly_reset);
 
     pair_group = make_tiny_overlay(usage_container, "Waiting for host\xE2\x80\xA6");
-    idle_group = make_tiny_overlay(usage_container, "No data\xE2\x80\xA6");
+    idle_group = build_idle_creature_tiny(usage_container);
 
     // Settings menu overlay — created last so it sits above the usage rows and
     // the pair/idle overlays when opened.
