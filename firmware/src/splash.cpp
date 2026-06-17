@@ -179,7 +179,7 @@ static void render_frame(const uint8_t *cells, const uint16_t *palette) {
 //      registry lets several coexist; splash_mini_tick() advances them all.
 //      Each instance self-paces off its own animation's hold times, so one tick
 //      call drives every creature regardless of which screen is showing. ----
-#define SPLASH_MINI_MAX 4
+#define SPLASH_MINI_MAX 6
 typedef struct {
     lv_obj_t *canvas;
     uint32_t *buf;     // ARGB8888 (alpha lets the creature float over content)

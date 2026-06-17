@@ -23,6 +23,7 @@ void ui_update_battery(int percent, bool charging);
 typedef enum {
     MENU_ACT_NONE = 0,
     MENU_ACT_REFRESH,    // ask the daemon to poll now
+    MENU_ACT_MODE,       // cycle the display mode (info ↔ playful)
     MENU_ACT_REPAIR,     // clear BLE bonds and re-advertise
     MENU_ACT_SLEEP,      // blank the display until the next interaction
     MENU_ACT_BACK,       // close the menu, no-op
@@ -43,6 +44,20 @@ void          ui_brightness_hud_show(uint8_t level);
 // it wipes away to reveal the usage view. Call once from setup(). No-op on
 // layouts without it (e.g. AMOLED boards, which have their own splash).
 void          ui_boot_greeting_show(void);
+
+// ---- Display mode (tiny mono layout) ----
+// The usage view has two faces: MODE_INFO is the straightforward 2-row bars;
+// MODE_PLAYFUL is "Claude's day" — quota as a rising tide with a claudepix
+// creature floating on the surface (calm low, frantic near the cap). Switched
+// via the menu's "View" item. No-op on layouts without the playful face.
+typedef enum {
+    MODE_INFO = 0,
+    MODE_PLAYFUL,
+    MODE_COUNT,
+} display_mode_t;
+
+void           ui_mode_cycle(void);   // advance to the next display mode (wraps)
+display_mode_t ui_mode_get(void);
 
 // Notify the UI that a refresh was requested (e.g. the menu's "Refresh now"),
 // so the usage-view stroller can hop in and blink while it's in flight. The

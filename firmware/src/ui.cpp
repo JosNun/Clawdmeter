@@ -247,6 +247,8 @@ static uint32_t  last_data_ms = 0;      // lv_tick when the last valid usage upd
 static bool      data_received = false; // any valid update since boot
 static int       view_state = -1;       // -1 unknown / 0 pair / 1 idle / 2 usage
 static const uint32_t DATA_FRESH_MS = 90000;  // usage counts as "live" within this window (daemon sends ~60s)
+static UsageData last_data = {};         // last valid update, so a mode switch can repaint
+static bool      have_last = false;
 
 // ---- Shared ----
 static lv_image_dsc_t logo_dsc;
@@ -637,11 +639,21 @@ static const struct {
     menu_action_t action;
 } MENU_ITEMS[] = {
     {"Refresh now",   MENU_ACT_REFRESH},
+    {"View",          MENU_ACT_MODE},     // label is overridden per current mode
     {"Re-pair",       MENU_ACT_REPAIR},
     {"Sleep display", MENU_ACT_SLEEP},
     {"Back",          MENU_ACT_BACK},
 };
 #define MENU_COUNT ((int)(sizeof(MENU_ITEMS) / sizeof(MENU_ITEMS[0])))
+
+// Menu label for an item — usually static, but the "View" row reflects the mode
+// it will switch *to*, so a glance shows what activating it does.
+static int display_mode = MODE_INFO;  // defined here; full machinery is below
+static const char* menu_label_for(int idx) {
+    if (MENU_ITEMS[idx].action == MENU_ACT_MODE)
+        return display_mode == MODE_INFO ? "View: Playful" : "View: Info";
+    return MENU_ITEMS[idx].label;
+}
 
 // Paint the 4-row window [menu_sel-1 .. menu_sel+2] (wrapping) into both copies.
 // Colors are fixed at build time (dark copy = bar text, light copy = dim text);
@@ -649,8 +661,8 @@ static const struct {
 static void render_menu(void) {
     for (int i = 0; i < MENU_ROWS; i++) {
         int idx = (((menu_sel - 1 + i) % MENU_COUNT) + MENU_COUNT) % MENU_COUNT;
-        lv_label_set_text(menu_row_dark[i],  MENU_ITEMS[idx].label);
-        lv_label_set_text(menu_row_light[i], MENU_ITEMS[idx].label);
+        lv_label_set_text(menu_row_dark[i],  menu_label_for(idx));
+        lv_label_set_text(menu_row_light[i], menu_label_for(idx));
     }
 }
 
@@ -796,6 +808,142 @@ static void build_boot_greeting(lv_obj_t* parent) {
     lv_obj_add_flag(boot_group, LV_OBJ_FLAG_HIDDEN);  // shown by ui_boot_greeting_show()
 }
 
+// ======== Playful "Claude's day" mode (tiny mono) ========
+// An alternate face for the live usage view. Instead of two bars, session quota
+// is a rising tide filling the panel from the bottom, and a claudepix creature
+// floats on the surface — fuller tide → higher creature, and it switches from a
+// calm blink to a frantic dance as it nears the cap. A small dim "S/W" readout
+// keeps the numbers reachable for anyone who still wants them. Built only on the
+// tiny layout (playful_group stays null elsewhere, so ui_mode_* are no-ops).
+// Shown in place of usage_group when display_mode == MODE_PLAYFUL; the two are
+// swapped by the same view-wipe used between pair/idle/usage.
+static lv_obj_t*  playful_group    = nullptr;
+static lv_obj_t*  playful_water    = nullptr;  // full-panel canvas: sky+sun + dithered tide
+static lv_obj_t*  playful_creature = nullptr;  // floats on the surface
+static lv_obj_t*  playful_readout  = nullptr;  // tiny "S## W##" chip (black-backed)
+static uint32_t*  playful_water_buf = nullptr; // ARGB8888 canvas backing store
+static int        playful_surface = 0;         // cached waterline y (flat baseline)
+static int        playful_weekly  = 0;         // cached weekly % (drives the sun)
+static uint8_t    playful_phase   = 0;         // ripple animation phase
+static uint32_t   playful_ripple_ms = 0;       // last ripple repaint
+
+#define PLAYFUL_CALM_ANIM   "idle blink"
+#define PLAYFUL_PANIC_ANIM  "dance bounce"
+#define PLAYFUL_PANIC_PCT   80            // session level where the creature frets
+#define PLAYFUL_RIPPLE_MS   140           // waterline ripple cadence
+#define PLAYFUL_SUN_R       3             // sun radius (px)
+
+static inline void playful_px(int x, int y) {
+    if (x >= 0 && x < L.scr_w && y >= 0 && y < L.scr_h)
+        lv_canvas_set_px(playful_water, x, y, lv_color_white(), LV_OPA_COVER);
+}
+
+// Paint the whole scene onto the one full-panel canvas:
+//   • a small "sun" on the right whose height tracks the weekly window — it sinks
+//     toward the horizon as the week is spent (sunset = week running out), and
+//     slips below the waterline when it's nearly gone;
+//   • the session tide — a 1px bright waterline that ripples (phase shifts a
+//     traveling 1px crest) over a 50% checker body. A solid fill would light ~75%
+//     of the panel and swallow the white creature; the dither keeps it dim and
+//     readable. Empty cells stay transparent so the black background shows.
+static void playful_paint_scene(int surface, int weekly, uint8_t phase) {
+    if (!playful_water) return;
+    lv_canvas_fill_bg(playful_water, lv_color_black(), LV_OPA_TRANSP);
+
+    // Tide first — a rippling 1px waterline over a 50% checker body.
+    if (surface < L.scr_h) {
+        for (int x = 0; x < L.scr_w; x++) {
+            int crest = surface - (((x + phase) % 6) < 3 ? 1 : 0);  // traveling 1px ripple
+            for (int y = crest; y < L.scr_h; y++)
+                if (y == crest || (((x + y) & 1) == 0)) playful_px(x, y);
+        }
+    }
+
+    // Sun on top — a solid disc whose height tracks the weekly window
+    // independently of the tide: high in the sky when the week is fresh, sunk to
+    // a bright blob in the sea (over the checker) when it's nearly spent.
+    int sun_cx = L.scr_w - 11;
+    int sun_cy = PLAYFUL_SUN_R + 1 + (L.scr_h - 2 * PLAYFUL_SUN_R - 2) * weekly / 100;
+    for (int dy = -PLAYFUL_SUN_R; dy <= PLAYFUL_SUN_R; dy++)
+        for (int dx = -PLAYFUL_SUN_R; dx <= PLAYFUL_SUN_R; dx++)
+            if (dx * dx + dy * dy <= PLAYFUL_SUN_R * PLAYFUL_SUN_R)
+                playful_px(sun_cx + dx, sun_cy + dy);
+}
+
+// Reflect the latest usage onto the playful scene. Safe to call before any data
+// arrives (renders an empty tide). Kept tiny-only via the null guard.
+static void playful_update(const UsageData* d) {
+    if (!playful_group) return;
+    int s = (int)(d->session_pct + 0.5f);
+    int w = (int)(d->weekly_pct + 0.5f);
+    if (s < 0) s = 0; else if (s > 100) s = 100;
+    if (w < 0) w = 0; else if (w > 100) w = 100;
+
+    playful_surface = L.scr_h - s * L.scr_h / 100;  // y of the waterline
+    playful_weekly  = w;
+    playful_paint_scene(playful_surface, playful_weekly, playful_phase);
+
+    // Float the creature just above the waterline, centred, clamped on-screen.
+    if (playful_creature) {
+        int cy = playful_surface - 18;     // mostly above the waterline
+        if (cy < 0) cy = 0;
+        else if (cy > L.scr_h - 20) cy = L.scr_h - 20;
+        lv_obj_set_pos(playful_creature, (L.scr_w - 20) / 2, cy);
+        splash_mini_set_anim(playful_creature,
+                             s >= PLAYFUL_PANIC_PCT ? PLAYFUL_PANIC_ANIM : PLAYFUL_CALM_ANIM);
+    }
+
+    if (playful_readout) lv_label_set_text_fmt(playful_readout, "S%d W%d", s, w);
+}
+
+// Advance the waterline ripple. Cheap full-canvas repaint on a slow cadence,
+// only while the playful scene is actually on screen. Driven from ui_tick_anim().
+static void playful_tick(void) {
+    if (!playful_group || !lv_obj_is_visible(playful_group)) return;
+    uint32_t now = lv_tick_get();
+    if (now - playful_ripple_ms < PLAYFUL_RIPPLE_MS) return;
+    playful_ripple_ms = now;
+    playful_phase++;
+    playful_paint_scene(playful_surface, playful_weekly, playful_phase);
+}
+
+static void build_playful_group_tiny(lv_obj_t* parent) {
+    playful_group = lv_obj_create(parent);
+    lv_obj_set_size(playful_group, L.scr_w, L.scr_h);
+    lv_obj_set_pos(playful_group, 0, 0);
+    lv_obj_set_style_bg_color(playful_group, COL_BG, 0);
+    lv_obj_set_style_bg_opa(playful_group, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(playful_group, 0, 0);
+    lv_obj_set_style_pad_all(playful_group, 0, 0);
+    lv_obj_clear_flag(playful_group, LV_OBJ_FLAG_SCROLLABLE);
+
+    // The scene is a full-panel ARGB canvas (transparent where empty); painted by
+    // playful_paint_scene() as a dithered tide + sun so it never washes out the panel.
+    playful_water_buf = (uint32_t*)malloc((size_t)L.scr_w * L.scr_h * 4);
+    if (playful_water_buf) {
+        playful_water = lv_canvas_create(playful_group);
+        lv_canvas_set_buffer(playful_water, playful_water_buf, L.scr_w, L.scr_h,
+                             LV_COLOR_FORMAT_ARGB8888);
+        lv_obj_set_pos(playful_water, 0, 0);
+        playful_surface = L.scr_h;       // start empty
+        playful_paint_scene(playful_surface, 0, 0);
+    }
+
+    // Tiny "S## W##" chip, top-left. A black backing keeps it legible even when
+    // the tide rises behind it (white text on white checker would vanish).
+    playful_readout = tiny_label(playful_group, 0, 0, "S-- W--", COL_TEXT);
+    lv_obj_set_style_bg_color(playful_readout, COL_BG, 0);
+    lv_obj_set_style_bg_opa(playful_readout, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_left(playful_readout, 1, 0);
+    lv_obj_set_style_pad_right(playful_readout, 1, 0);
+
+    // The floating creature, drawn last so it sits above water + readout.
+    playful_creature = splash_mini_create(playful_group, PLAYFUL_CALM_ANIM, 20);
+    if (playful_creature) lv_obj_set_pos(playful_creature, (L.scr_w - 20) / 2, L.scr_h - 20);
+
+    lv_obj_add_flag(playful_group, LV_OBJ_FLAG_HIDDEN);  // shown only in MODE_PLAYFUL
+}
+
 static void init_usage_screen_tiny(lv_obj_t* scr) {
     usage_container = lv_obj_create(scr);
     lv_obj_set_size(usage_container, L.scr_w, L.scr_h);
@@ -822,6 +970,10 @@ static void init_usage_screen_tiny(lv_obj_t* scr) {
         lv_obj_set_pos(walker, L.scr_w, 12);  // off the right edge, parked on the bottom row
         lv_obj_add_flag(walker, LV_OBJ_FLAG_HIDDEN);
     }
+
+    // Alternate "playful" face of the usage view — a sibling of usage_group,
+    // swapped in by display_mode. Built before the overlays so they sit above it.
+    build_playful_group_tiny(usage_container);
 
     pair_group = make_tiny_overlay(usage_container, "Waiting for host\xE2\x80\xA6");
     idle_group = build_idle_creature_tiny(usage_container);
@@ -958,6 +1110,8 @@ void ui_update(const UsageData* data) {
     if (!data->valid) return;
     last_data_ms = lv_tick_get();   // a valid usage update just landed → dot goes green
     data_received = true;
+    last_data = *data;              // cache so a display-mode switch can repaint
+    have_last = true;
 
     if (data->clock_epoch > 0) {    // daemon supplied wall-clock time → drive the title clock
         clock_base_epoch = data->clock_epoch;
@@ -1038,7 +1192,8 @@ void ui_update(const UsageData* data) {
         lv_label_set_text(lbl_weekly_reset, buf);
     }
 
-    walker_on_data();   // a refresh landed → stroll (or end a waiting hold)
+    playful_update(data);  // mirror onto the playful scene (no-op if not built)
+    walker_on_data();      // a refresh landed → stroll (or end a waiting hold)
 }
 
 // Pick the usage-view sub-screen: pairing hint (BLE down), the idle "Zzz" screen
@@ -1052,8 +1207,13 @@ void ui_update(const UsageData* data) {
 // state enters from the right (the list "advances"), a lower one from the left.
 #define VIEW_WIPE_MS 200
 
+// Which group represents the live usage view right now — depends on the mode.
+static lv_obj_t* usage_view_group(void) {
+    return (display_mode == MODE_PLAYFUL && playful_group) ? playful_group : usage_group;
+}
+
 static lv_obj_t* view_group_ptr(int v) {
-    return v == 0 ? pair_group : (v == 1 ? idle_group : usage_group);
+    return v == 0 ? pair_group : (v == 1 ? idle_group : usage_view_group());
 }
 
 static void view_anim_x_cb(void* obj, int32_t x) {
@@ -1171,8 +1331,8 @@ static void walker_start(bool waiting) {
 // A refresh was requested (e.g. menu "Refresh now"): hop in and hold the blink
 // until the data lands. Only on the live usage view.
 static void walker_on_refresh_requested(void) {
-    if (walker && current_screen == SCREEN_USAGE && view_state == 2 &&
-        walker_state == W_IDLE)
+    if (walker && display_mode == MODE_INFO && current_screen == SCREEN_USAGE &&
+        view_state == 2 && walker_state == W_IDLE)
         walker_start(true);
 }
 
@@ -1184,7 +1344,8 @@ static void walker_on_data(void) {
     if (walker_state == W_PAUSE && walker_waiting) {
         if (walker_pause_timer) { lv_timer_delete(walker_pause_timer); walker_pause_timer = nullptr; }
         walker_begin_exit();
-    } else if (walker_state == W_IDLE && current_screen == SCREEN_USAGE && view_state == 2) {
+    } else if (walker_state == W_IDLE && display_mode == MODE_INFO &&
+               current_screen == SCREEN_USAGE && view_state == 2) {
         walker_start(false);
     }
 }
@@ -1199,11 +1360,20 @@ static void update_view_state(void) {
     } else {
         v = 1;  // idle / Zzz
     }
+    // The inactive usage representation (the mode we're not in) must never show.
+    lv_obj_t* active_usage = usage_view_group();
+    if (playful_group) {
+        lv_obj_t* inactive = (active_usage == usage_group) ? playful_group : usage_group;
+        lv_anim_delete(inactive, view_anim_x_cb);
+        lv_obj_set_x(inactive, 0);
+        lv_obj_add_flag(inactive, LV_OBJ_FLAG_HIDDEN);
+    }
+
     if (v == view_state) return;
     int old = view_state;
     view_state = v;
 
-    lv_obj_t* groups[3] = {pair_group, idle_group, usage_group};
+    lv_obj_t* groups[3] = {pair_group, idle_group, active_usage};
     // Cancel any in-flight wipe and park every group at rest first.
     for (int i = 0; i < 3; i++) {
         lv_anim_delete(groups[i], view_anim_x_cb);
@@ -1236,6 +1406,7 @@ void ui_tick_anim(void) {
     if (current_screen != SCREEN_USAGE) return;
     update_view_state();
     splash_mini_tick();   // advance every embedded creature; hidden ones self-skip
+    playful_tick();       // ripple the playful tide (no-op unless that scene shows)
     // The stroller is driven by refresh events (ui_update / ui_refresh_requested),
     // not a timer — nothing to poll here.
 
@@ -1377,6 +1548,44 @@ static void boot_greet_dismiss_cb(lv_timer_t* t) {
 
 void ui_refresh_requested(void) {
     walker_on_refresh_requested();
+}
+
+display_mode_t ui_mode_get(void) {
+    return (display_mode_t)display_mode;
+}
+
+// Advance to the next display mode. If the live usage view is on screen (and not
+// hidden behind the open menu), wipe between the two representations the same way
+// we wipe between view-states; otherwise just swap visibility so the correct one
+// is revealed when the usage view next appears.
+void ui_mode_cycle(void) {
+    if (!playful_group) return;  // no playful face on this layout — no-op
+    int old_mode = display_mode;
+    display_mode = (display_mode + 1) % MODE_COUNT;
+    if (have_last) playful_update(&last_data);  // freshen the incoming scene
+
+    lv_obj_t* ng = usage_view_group();
+    lv_obj_t* og = (ng == usage_group) ? playful_group : usage_group;
+
+    // Only the live usage view shows a usage representation; in pair/idle states
+    // both stay hidden and update_view_state picks the right one later.
+    bool on_usage = (current_screen == SCREEN_USAGE && view_state == 2);
+    bool occluded = ui_menu_is_open();   // menu covers the view → no point animating
+
+    if (on_usage && !occluded) {
+        lv_anim_delete(og, view_anim_x_cb);
+        lv_anim_delete(ng, view_anim_x_cb);
+        lv_obj_set_x(og, 0);
+        lv_obj_set_x(ng, 0);
+        int dir = (display_mode > old_mode) ? 1 : -1;  // playful sits "after" info
+        view_slide(ng, dir * L.scr_w, 0,        false);
+        view_slide(og, 0,            -dir * L.scr_w, true);
+    } else if (on_usage) {
+        // Hidden swap behind the menu: snap so the reveal shows the new mode.
+        lv_obj_add_flag(og, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_x(ng, 0);
+        lv_obj_clear_flag(ng, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 void ui_boot_greeting_show(void) {

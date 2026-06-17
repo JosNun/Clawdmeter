@@ -99,8 +99,66 @@ def stroll_path(W, base_y=6, arc=6, hops=2, n_in=6, n_out=6, n_pause=2):
         pts.append((x, y))
     return pts
 
+# ---- Playful "Claude's day" mode preview ----
+# Mirrors ui.cpp: a dithered tide (bright waterline + 50% checker body) rising
+# from the bottom to surface = H - H*session/100, a creature floating just above
+# the waterline, and a dim "S## W##" readout top-left. Renders the true 1-bit
+# look so we can tune brightness/visibility without flashing.
+def playful_scene(pals, frames, session, weekly, frame_idx=0, phase=0, sun_r=3,
+                  W=128, H=32, calm="idle blink", panic="dance bounce", panic_pct=80):
+    from PIL import Image, ImageDraw
+    img = Image.new('L', (W, H), 0)
+    px = img.load()
+    s = max(0, min(100, int(round(session))))
+    w = max(0, min(100, int(round(weekly))))
+    surface = H - s * H // 100
+    # tide: rippling 1px waterline + 50% checker body (matches playful_paint_scene)
+    for x in range(W):
+        crest = surface - (1 if (x + phase) % 6 < 3 else 0)
+        for y in range(crest, H):
+            if y == crest or ((x + y) & 1) == 0:
+                if 0 <= y < H:
+                    px[x, y] = 255
+    # sun on top: filled disc on the right, height tracks weekly (independent of tide)
+    sun_cx = W - 11
+    sun_cy = sun_r + 1 + (H - 2 * sun_r - 2) * w // 100
+    for dy in range(-sun_r, sun_r + 1):
+        for dx in range(-sun_r, sun_r + 1):
+            if dx * dx + dy * dy <= sun_r * sun_r:
+                if 0 <= sun_cx + dx < W and 0 <= sun_cy + dy < H:
+                    px[sun_cx + dx, sun_cy + dy] = 255
+    # creature floats just above the waterline, clamped on-screen
+    key = (panic if s >= panic_pct else calm).replace(" ", "_")
+    pal, frs = pals[key], frames[key]
+    st = render_states(pal, frs[frame_idx % len(frs)], outline=True)
+    cy = max(0, min(H - 20, surface - 18))
+    img = composite(img, st, (W - 20) // 2, cy)
+    # black-backed readout chip, top-left (approximate font; real one is styrene_12)
+    d = ImageDraw.Draw(img)
+    tag = f"S{s} W{w}"
+    d.rectangle([0, 0, 6 * len(tag), 8], fill=0)
+    d.text((1, 0), tag, fill=255)
+    return img
+
+def main_playful():
+    from PIL import Image
+    pals, frames = load()
+    levels = [10, 40, 73, 95]
+    W, H, SCALE = 128, 32, 6
+    tiles = [playful_scene(pals, frames, lv, lv // 2).resize(
+                (W * SCALE, H * SCALE), Image.NEAREST).convert('RGB') for lv in levels]
+    sheet = Image.new('RGB', (W * SCALE, H * SCALE * len(tiles) + 6 * (len(tiles) - 1)), (40, 40, 40))
+    y = 0
+    for t in tiles:
+        sheet.paste(t, (0, y)); y += H * SCALE + 6
+    out = "/tmp/playful_sim.png"
+    sheet.save(out)
+    print("wrote %s (session levels %s)" % (out, levels))
+
 def main():
     from PIL import Image
+    if len(sys.argv) > 1 and sys.argv[1] == "playful":
+        main_playful(); return
     name = sys.argv[1] if len(sys.argv) > 1 else "dance bounce"
     key = name.replace(" ", "_")
     arc   = int(sys.argv[2]) if len(sys.argv) > 2 else 6
