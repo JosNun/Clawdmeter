@@ -555,16 +555,22 @@ static lv_obj_t* make_tiny_overlay(lv_obj_t* parent, const char* text) {
     return g;
 }
 
-// Usage-view "stroller": a claudepix creature that occasionally hops across the
-// usage rows and off the other side. Its canvas is an opaque 20×20 block (white
-// creature on true-black), so it cleanly occludes the stats as it passes and
-// they restore perfectly once it leaves — no permanent space given up. Parented
-// in usage_group (so it only shows on the usage view and rides the view wipe);
-// motion + retrigger live near the view-animation helpers below.
-static lv_obj_t* walker = nullptr;
-static bool      walker_active = false;
-static uint32_t  walker_last_ms = 0;
-#define WALKER_INTERVAL_MS 180000   // ~3 min of usage view between strolls
+// Usage-view "stroller": a claudepix creature that hops across the usage rows on
+// a data refresh. Its canvas is transparent with a 1px black outline (see
+// mini_render), so it floats over the stats and they restore once it leaves — no
+// permanent space given up. Parented in usage_group (shows only on the usage
+// view, rides the view wipe). The stroll is tied to refreshes, not a timer: he
+// hops in, blinks at centre while the refresh is in flight, and hops off when
+// the data lands — a routine push is a quick visit, a manual "Refresh now"
+// (which waits on the API) holds the blink until it completes. State machine and
+// triggers live near the view-animation helpers below.
+enum { W_IDLE, W_IN, W_PAUSE, W_OUT };
+static lv_obj_t*   walker = nullptr;
+static int         walker_state = W_IDLE;
+static bool        walker_outbound = false;   // path direction: false=hop in, true=hop out
+static bool        walker_waiting = false;     // holding at centre for an in-flight refresh
+static bool        walker_data_ready = false;  // data arrived during this stroll
+static lv_timer_t* walker_pause_timer = nullptr;
 
 // The idle ("connected, data went stale") overlay: a small blinking claudepix
 // creature on the left with the status caption beside it. Opaque so it covers
@@ -813,7 +819,7 @@ static void init_usage_screen_tiny(lv_obj_t* scr) {
     // Occasional hop-across creature, on top of the rows, parked off-screen.
     walker = splash_mini_create(usage_group, "dance bounce", 20);
     if (walker) {
-        lv_obj_set_pos(walker, L.scr_w, 6);  // off the right edge; y centres 20px in 32
+        lv_obj_set_pos(walker, L.scr_w, 12);  // off the right edge, parked on the bottom row
         lv_obj_add_flag(walker, LV_OBJ_FLAG_HIDDEN);
     }
 
@@ -946,6 +952,8 @@ void ui_init(void) {
     }
 }
 
+static void walker_on_data(void);  // stroller reacts to fresh data (defined below)
+
 void ui_update(const UsageData* data) {
     if (!data->valid) return;
     last_data_ms = lv_tick_get();   // a valid usage update just landed → dot goes green
@@ -1029,6 +1037,8 @@ void ui_update(const UsageData* data) {
         else        format_reset_time(data->weekly_reset_mins, buf, sizeof(buf));
         lv_label_set_text(lbl_weekly_reset, buf);
     }
+
+    walker_on_data();   // a refresh landed → stroll (or end a waiting hold)
 }
 
 // Pick the usage-view sub-screen: pairing hint (BLE down), the idle "Zzz" screen
@@ -1070,51 +1080,113 @@ static void view_slide(lv_obj_t* g, int from, int to, bool hide_when_done) {
 }
 
 // ---- Usage-view stroller motion ----
-// Hop in from the right to centre, pause (bouncing in place), then hop off the
-// left. Reuses view_anim_x_cb to drive the creature's x.
+// Sequence: hop in (dance bounce) from the right to centre → pause and blink a
+// couple of times (swap to idle blink) → hop out (dance bounce) off the left.
+// Rather than gliding flat, a single progress value (0..1000) drives BOTH axes
+// through walker_path_cb: x sweeps linearly while y traces WALKER_HOPS parabolic
+// arcs (integer math, no float), so the creature bobs up and down as it crosses.
 #define WALKER_HOP_MS    1300
-#define WALKER_PAUSE_MS  1200
+#define WALKER_PAUSE_MS  2600   // routine-stroll dwell: a blink or two, then leave
+#define WALKER_MAX_HOLD_MS 12000 // safety cap for a waiting hold if data never lands
+#define WALKER_CENTER    ((L.scr_w - 20) / 2)
+#define WALKER_BASE_Y    12     // parks the 20px creature on the bottom (weekly) row
+#define WALKER_ARC       6      // hop height in px; apex briefly reaches the session row
+#define WALKER_HOPS      2      // arcs per traverse half
+
+// prog 0..1000 → set x (linear across the current direction) and y (parabolic hops).
+static void walker_path_cb(void* var, int32_t prog) {
+    int x0 = walker_outbound ? WALKER_CENTER : L.scr_w;
+    int x1 = walker_outbound ? -20           : WALKER_CENTER;
+    int x  = x0 + (int)((x1 - x0) * prog / 1000);
+
+    int seg = 1000 / WALKER_HOPS;           // one arc per segment
+    int s   = (int)prog % seg;              // position within the current arc
+    int h   = 4 * WALKER_ARC * s * (seg - s) / (seg * seg);  // parabola, peak=ARC
+    lv_obj_set_pos((lv_obj_t*)var, x, WALKER_BASE_Y - h);
+}
+
+static void walker_traverse(lv_anim_completed_cb_t done) {
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, walker);
+    lv_anim_set_exec_cb(&a, walker_path_cb);
+    lv_anim_set_values(&a, 0, 1000);
+    lv_anim_set_duration(&a, WALKER_HOP_MS);
+    lv_anim_set_path_cb(&a, lv_anim_path_linear);  // even hop spacing
+    lv_anim_set_completed_cb(&a, done);
+    lv_anim_start(&a);
+}
 
 static void walker_done(lv_anim_t* a) {
     (void)a;
     if (walker) {
         lv_obj_add_flag(walker, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_set_x(walker, L.scr_w);  // re-park off the right
+        lv_obj_set_pos(walker, L.scr_w, WALKER_BASE_Y);  // re-park off the right
     }
-    walker_active = false;
+    walker_state = W_IDLE;
+    walker_waiting = false;
+    walker_data_ready = false;
 }
 
-static void walker_exit(lv_anim_t* a) {
+static void walker_begin_exit(void) {
+    if (!walker) return;
+    walker_waiting = false;
+    walker_state = W_OUT;
+    walker_outbound = true;
+    splash_mini_set_anim(walker, "dance bounce");   // back to hopping for the exit
+    walker_traverse(walker_done);
+}
+
+static void walker_hop_out_cb(lv_timer_t* t) {
+    (void)t;
+    walker_pause_timer = nullptr;  // one-shot — LVGL deletes it after this fires
+    walker_begin_exit();
+}
+
+static void walker_pause(lv_anim_t* a) {  // arrived at centre → blink, then leave
     (void)a;
     if (!walker) return;
-    int center = (L.scr_w - 20) / 2;
-    lv_anim_t e;
-    lv_anim_init(&e);
-    lv_anim_set_var(&e, walker);
-    lv_anim_set_exec_cb(&e, view_anim_x_cb);
-    lv_anim_set_values(&e, center, -20);
-    lv_anim_set_duration(&e, WALKER_HOP_MS);
-    lv_anim_set_delay(&e, WALKER_PAUSE_MS);   // dwell at centre before leaving
-    lv_anim_set_path_cb(&e, lv_anim_path_ease_in);
-    lv_anim_set_completed_cb(&e, walker_done);
-    lv_anim_start(&e);
+    walker_state = W_PAUSE;
+    splash_mini_set_anim(walker, "idle blink");
+    // Hold for the in-flight refresh (capped) unless its data already landed;
+    // a routine stroll just blinks briefly.
+    uint32_t hold = (walker_waiting && !walker_data_ready) ? WALKER_MAX_HOLD_MS
+                                                           : WALKER_PAUSE_MS;
+    walker_pause_timer = lv_timer_create(walker_hop_out_cb, hold, nullptr);
+    lv_timer_set_repeat_count(walker_pause_timer, 1);
 }
 
-static void walker_start(void) {
-    if (!walker || walker_active) return;
-    walker_active = true;
-    int center = (L.scr_w - 20) / 2;
-    lv_obj_set_x(walker, L.scr_w);
+static void walker_start(bool waiting) {
+    if (!walker || walker_state != W_IDLE) return;
+    walker_state = W_IN;
+    walker_outbound = false;
+    walker_waiting = waiting;
+    walker_data_ready = false;
+    splash_mini_set_anim(walker, "dance bounce");
+    lv_obj_set_pos(walker, L.scr_w, WALKER_BASE_Y);
     lv_obj_clear_flag(walker, LV_OBJ_FLAG_HIDDEN);
-    lv_anim_t a;
-    lv_anim_init(&a);
-    lv_anim_set_var(&a, walker);
-    lv_anim_set_exec_cb(&a, view_anim_x_cb);
-    lv_anim_set_values(&a, L.scr_w, center);
-    lv_anim_set_duration(&a, WALKER_HOP_MS);
-    lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
-    lv_anim_set_completed_cb(&a, walker_exit);  // chain: enter → pause → exit
-    lv_anim_start(&a);
+    walker_traverse(walker_pause);  // chain: hop in → pause/blink → hop out
+}
+
+// A refresh was requested (e.g. menu "Refresh now"): hop in and hold the blink
+// until the data lands. Only on the live usage view.
+static void walker_on_refresh_requested(void) {
+    if (walker && current_screen == SCREEN_USAGE && view_state == 2 &&
+        walker_state == W_IDLE)
+        walker_start(true);
+}
+
+// Fresh data landed: end a waiting hold (hop out now), or — if idle — do a quick
+// "fresh data" stroll for the routine push case.
+static void walker_on_data(void) {
+    if (!walker) return;
+    walker_data_ready = true;
+    if (walker_state == W_PAUSE && walker_waiting) {
+        if (walker_pause_timer) { lv_timer_delete(walker_pause_timer); walker_pause_timer = nullptr; }
+        walker_begin_exit();
+    } else if (walker_state == W_IDLE && current_screen == SCREEN_USAGE && view_state == 2) {
+        walker_start(false);
+    }
 }
 
 static void update_view_state(void) {
@@ -1164,13 +1236,8 @@ void ui_tick_anim(void) {
     if (current_screen != SCREEN_USAGE) return;
     update_view_state();
     splash_mini_tick();   // advance every embedded creature; hidden ones self-skip
-
-    // Occasionally send the stroller across the live usage view.
-    if (walker && view_state == 2 && !walker_active &&
-        lv_tick_get() - walker_last_ms > WALKER_INTERVAL_MS) {
-        walker_last_ms = lv_tick_get();
-        walker_start();
-    }
+    // The stroller is driven by refresh events (ui_update / ui_refresh_requested),
+    // not a timer — nothing to poll here.
 
     uint32_t now = lv_tick_get();
 
@@ -1306,6 +1373,10 @@ static void boot_greet_dismiss_cb(lv_timer_t* t) {
     lv_anim_set_path_cb(&a, lv_anim_path_ease_in_out);
     lv_anim_set_completed_cb(&a, boot_greet_done);
     lv_anim_start(&a);
+}
+
+void ui_refresh_requested(void) {
+    walker_on_refresh_requested();
 }
 
 void ui_boot_greeting_show(void) {

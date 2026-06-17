@@ -386,7 +386,7 @@ void loop() {
             if (clicked) {
                 menu_action_t act = ui_menu_activate();
                 switch (act) {
-                case MENU_ACT_REFRESH: ble_request_refresh(); break;
+                case MENU_ACT_REFRESH: ble_request_refresh(); ui_refresh_requested(); break;
                 case MENU_ACT_REPAIR:  ble_clear_bonds();      break;
                 case MENU_ACT_SLEEP:   ui_menu_close(); idle_force_sleep(); break;
                 case MENU_ACT_BACK:

@@ -182,7 +182,7 @@ static void render_frame(const uint8_t *cells, const uint16_t *palette) {
 #define SPLASH_MINI_MAX 4
 typedef struct {
     lv_obj_t *canvas;
-    uint16_t *buf;
+    uint32_t *buf;     // ARGB8888 (alpha lets the creature float over content)
     int       cell;
     int       w;
     const splash_anim_def_t *anim;
@@ -192,6 +192,19 @@ typedef struct {
 static splash_mini_t minis[SPLASH_MINI_MAX];
 static int mini_count = 0;
 
+// RGB565 palette entry -> opaque ARGB8888 (little-endian 0xAARRGGBB).
+static inline uint32_t argb_from_565(uint16_t c) {
+    uint32_t r = ((c >> 11) & 0x1F) * 255 / 31;
+    uint32_t g = ((c >> 5) & 0x3F) * 255 / 63;
+    uint32_t b = (c & 0x1F) * 255 / 31;
+    return b | (g << 8) | (r << 16) | (0xFFu << 24);
+}
+
+// Render into an ARGB8888 canvas: silhouette cells keep their palette colour;
+// empty cells are transparent EXCEPT where they touch the silhouette, which
+// become opaque black — a 1px outline so the creature reads cleanly over
+// content (white text/bars) instead of as a moving box. On the 1-bit panel the
+// outline thresholds off, carving a dark gap around the white body.
 static void mini_render(splash_mini_t *m) {
     if (!m->buf || !m->anim) return;
     const uint8_t *cells = m->anim->frames[m->frame];
@@ -199,9 +212,23 @@ static void mini_render(splash_mini_t *m) {
     for (int gy = 0; gy < GRID; gy++) {
         for (int gx = 0; gx < GRID; gx++) {
             uint8_t code = cells[gy * GRID + gx];
-            uint16_t color = (pal && code < SPLASH_PALETTE_SIZE) ? pal[code] : COL_EMPTY;
+            uint32_t color;
+            if (code != 0) {
+                color = argb_from_565((pal && code < SPLASH_PALETTE_SIZE) ? pal[code] : COL_EMPTY);
+            } else {
+                bool edge = false;
+                for (int dy = -1; dy <= 1 && !edge; dy++) {
+                    for (int dx = -1; dx <= 1; dx++) {
+                        if (!dx && !dy) continue;
+                        int nx = gx + dx, ny = gy + dy;
+                        if (nx >= 0 && nx < GRID && ny >= 0 && ny < GRID &&
+                            cells[ny * GRID + nx] != 0) { edge = true; break; }
+                    }
+                }
+                color = edge ? 0xFF000000u : 0x00000000u;  // black outline / transparent
+            }
             for (int dy = 0; dy < m->cell; dy++) {
-                uint16_t *dst = &m->buf[(gy * m->cell + dy) * m->w + gx * m->cell];
+                uint32_t *dst = &m->buf[(gy * m->cell + dy) * m->w + gx * m->cell];
                 for (int dx = 0; dx < m->cell; dx++) dst[dx] = color;
             }
         }
@@ -209,12 +236,15 @@ static void mini_render(splash_mini_t *m) {
     if (m->canvas) lv_obj_invalidate(m->canvas);
 }
 
+static const splash_anim_def_t* mini_find_anim(const char *name) {
+    for (int i = 0; i < SPLASH_ANIM_COUNT; i++)
+        if (strcmp(splash_anims[i].name, name) == 0) return &splash_anims[i];
+    return NULL;
+}
+
 lv_obj_t* splash_mini_create(lv_obj_t *parent, const char *anim_name, int px) {
     if (mini_count >= SPLASH_MINI_MAX) return NULL;
-    const splash_anim_def_t *anim = NULL;
-    for (int i = 0; i < SPLASH_ANIM_COUNT; i++) {
-        if (strcmp(splash_anims[i].name, anim_name) == 0) { anim = &splash_anims[i]; break; }
-    }
+    const splash_anim_def_t *anim = mini_find_anim(anim_name);
     if (!anim) return NULL;
     int mcell = px / GRID;
     if (mcell < 1) mcell = 1;
@@ -224,10 +254,10 @@ lv_obj_t* splash_mini_create(lv_obj_t *parent, const char *anim_name, int px) {
 #else
     const uint32_t caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
 #endif
-    uint16_t *buf = (uint16_t*)heap_caps_malloc(mw * mw * 2, caps);
+    uint32_t *buf = (uint32_t*)heap_caps_malloc(mw * mw * 4, caps);
     if (!buf) return NULL;
     lv_obj_t *cv = lv_canvas_create(parent);
-    lv_canvas_set_buffer(cv, buf, mw, mw, LV_COLOR_FORMAT_RGB565);
+    lv_canvas_set_buffer(cv, buf, mw, mw, LV_COLOR_FORMAT_ARGB8888);
 
     splash_mini_t *m = &minis[mini_count++];
     m->canvas  = cv;
@@ -239,6 +269,20 @@ lv_obj_t* splash_mini_create(lv_obj_t *parent, const char *anim_name, int px) {
     m->started = millis();
     mini_render(m);
     return cv;
+}
+
+void splash_mini_set_anim(lv_obj_t *canvas, const char *anim_name) {
+    const splash_anim_def_t *anim = mini_find_anim(anim_name);
+    if (!anim) return;
+    for (int i = 0; i < mini_count; i++) {
+        if (minis[i].canvas != canvas) continue;
+        if (minis[i].anim == anim) return;   // already on it — don't restart
+        minis[i].anim    = anim;
+        minis[i].frame   = 0;
+        minis[i].started = millis();
+        mini_render(&minis[i]);
+        return;
+    }
 }
 
 void splash_mini_tick(void) {

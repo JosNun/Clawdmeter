@@ -35,3 +35,9 @@ lv_obj_t* splash_get_root(void);
 // them all, and each self-skips (resetting to frame 0) while its screen hides.
 lv_obj_t* splash_mini_create(lv_obj_t *parent, const char *anim_name, int px);
 void splash_mini_tick(void);
+
+// Swap an existing mini creature (by its canvas) to a different animation,
+// restarting from frame 0. No-op if the canvas isn't a known mini or it's
+// already on that animation. Lets a creature change pose mid-sequence (e.g. the
+// usage-view stroller switching to a blink while it pauses).
+void splash_mini_set_anim(lv_obj_t *canvas, const char *anim_name);

@@ -43,3 +43,9 @@ void          ui_brightness_hud_show(uint8_t level);
 // it wipes away to reveal the usage view. Call once from setup(). No-op on
 // layouts without it (e.g. AMOLED boards, which have their own splash).
 void          ui_boot_greeting_show(void);
+
+// Notify the UI that a refresh was requested (e.g. the menu's "Refresh now"),
+// so the usage-view stroller can hop in and blink while it's in flight. The
+// matching completion is driven by ui_update() when the data lands. No-op where
+// the stroller isn't built.
+void          ui_refresh_requested(void);
