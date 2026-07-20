@@ -6,6 +6,10 @@ ESP32 "Clawdmeter" peripheral over a custom GATT service. Uses
 bleak (CoreBluetooth backend on macOS).
 """
 
+# PEP 604 `X | None` annotations run natively only on 3.10+; this makes all
+# annotations lazy strings so they don't blow up on the 3.9 venv we ship.
+from __future__ import annotations
+
 import asyncio
 import calendar
 import datetime
@@ -193,15 +197,23 @@ _cb_manager = None  # reused CentralManagerDelegate (CoreBluetooth)
 
 
 async def _get_cb_manager():
-    """Lazily create and ready a shared CoreBluetooth central manager."""
+    """Lazily create and ready a shared CoreBluetooth central manager.
+
+    bleak >= 1.0 builds the delegate with the Objective-C ``alloc().init()``
+    dance (the old ``CentralManagerDelegate()`` + ``await wait_until_ready()``
+    API was removed). ``init()`` blocks until the central reaches
+    CBManagerStatePoweredOn and raises ``BleakError`` if Bluetooth is
+    off/unauthorized/unsupported — callers already treat that as "no device".
+    """
     global _cb_manager
     if _cb_manager is None:
         from bleak.backends.corebluetooth.CentralManagerDelegate import (
             CentralManagerDelegate,
         )
 
-        mgr = CentralManagerDelegate()
-        await mgr.wait_until_ready()  # raises if Bluetooth is unauthorized/off
+        mgr = CentralManagerDelegate.alloc().init()
+        if mgr is None:
+            raise BleakError("Failed to initialize CoreBluetooth central manager")
         _cb_manager = mgr
     return _cb_manager
 
@@ -772,7 +784,29 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
+    exit_code = 0
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        sys.exit(0)
+        pass
+    except BaseException:  # noqa: BLE001 — log and hard-exit; see below
+        import traceback
+
+        traceback.print_exc()
+        exit_code = 1
+    # Hard-exit without running interpreter finalization, on EVERY exit path.
+    # bleak's CoreBluetooth backend keeps a CBCentralManager alive with KVO
+    # observers for the life of the process. If a Bluetooth state-change
+    # callback (typically on sleep/wake) lands on the CoreBluetooth dispatch
+    # queue while Py_FinalizeEx is running GC, pyobjc re-enters the finalizing
+    # interpreter and take_gil calls pthread_exit() on a libdispatch worker
+    # thread — which is not a pthread, so the process is SIGKILLed
+    # ("pthread_exit() called from a thread not created by pthread_create").
+    # Skipping finalization removes the window: no GC deallocation of the CB
+    # objects, and the process is gone before any late callback can touch the
+    # interpreter. Exit 0 on a clean stop (launchd's SuccessfulExit=false leaves
+    # it stopped); non-zero on an unexpected error so launchd restarts it after
+    # ThrottleInterval.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(exit_code)
