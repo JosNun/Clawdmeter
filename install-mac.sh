@@ -9,6 +9,9 @@ PLIST_SRC="$SCRIPT_DIR/daemon/$SERVICE_LABEL.plist"
 PLIST_DST="$HOME/Library/LaunchAgents/$SERVICE_LABEL.plist"
 VENV_DIR="$SCRIPT_DIR/daemon/.venv"
 DAEMON_PY="$SCRIPT_DIR/daemon/claude_usage_daemon.py"
+MACAPP_SRC="$SCRIPT_DIR/daemon/macapp"
+APP_DIR="$SCRIPT_DIR/daemon/ClawdmeterDaemon.app"
+APP_EXEC="$APP_DIR/Contents/MacOS/clawdmeter-daemon"
 LOG_DIR="$HOME/Library/Logs"
 LOG_OUT="$LOG_DIR/claude-usage-daemon.out.log"
 LOG_ERR="$LOG_DIR/claude-usage-daemon.err.log"
@@ -135,8 +138,12 @@ configure_chime() {
 echo "=== Clawdmeter macOS install ==="
 echo ""
 
-echo "[1/6] Checking prerequisites..."
+echo "[1/7] Checking prerequisites..."
 command -v curl >/dev/null || { echo "Error: curl is required"; exit 1; }
+# cc + codesign (Xcode Command Line Tools) build & sign the .app launcher below.
+for cmd in cc codesign; do
+    command -v "$cmd" >/dev/null || { echo "Error: $cmd is required (install with: xcode-select --install)"; exit 1; }
+done
 
 # The daemon uses Python 3.10+ syntax (PEP 604 `X | None`). macOS ships an
 # older system python3 (3.9), so prefer a newer interpreter — Homebrew's if
@@ -178,7 +185,7 @@ fi
 echo "  OK"
 echo ""
 
-echo "[2/6] Creating Python virtualenv at daemon/.venv ..."
+echo "[2/7] Creating Python virtualenv at daemon/.venv ..."
 # Recreate the venv if it's missing or was built with an interpreter older
 # than 3.10 (e.g. a previous run that picked the system python3).
 if [ -d "$VENV_DIR" ] && ! py_ge_310 "$VENV_DIR/bin/python"; then
@@ -194,9 +201,24 @@ PYTHON_BIN="$VENV_DIR/bin/python"
 echo "  OK ($PYTHON_BIN)"
 echo ""
 
-echo "[3/6] Rendering launchd plist..."
+# The launchd job runs the daemon through this .app bundle so macOS attributes
+# Bluetooth access to a stable, named identity ("Clawdmeter Daemon") instead of
+# the bare python3 — which has no bundle and can never own a permission prompt.
+echo "[3/7] Building ClawdmeterDaemon.app (Bluetooth permission identity)..."
+rm -rf "$APP_DIR"
+mkdir -p "$APP_DIR/Contents/MacOS"
+cp "$MACAPP_SRC/Info.plist" "$APP_DIR/Contents/Info.plist"
+cc -O2 -Wall -o "$APP_EXEC" "$MACAPP_SRC/launcher.c"
+# Ad-hoc code signature gives the bundle a stable cdhash so the granted
+# permission sticks across launches. --force overwrites any prior signature.
+codesign --force --sign - --identifier software.playful.clawdmeter-daemon "$APP_DIR"
+echo "  Built & signed: $APP_DIR"
+echo ""
+
+echo "[4/7] Rendering launchd plist..."
 mkdir -p "$HOME/Library/LaunchAgents" "$LOG_DIR"
 sed \
+    -e "s|__APP_EXEC__|${APP_EXEC}|g" \
     -e "s|__PYTHON_BIN__|${PYTHON_BIN}|g" \
     -e "s|__DAEMON_PATH__|${DAEMON_PY}|g" \
     -e "s|__REPO_DIR__|${SCRIPT_DIR}|g" \
@@ -209,30 +231,30 @@ echo ""
 
 # Interactive daemon configuration: which plans to poll, plus the optional
 # clock display and session-reset chime. All re-read by the daemon each poll.
-echo "[4/6] Configuring the daemon..."
+echo "[5/7] Configuring the daemon..."
 configure_config_dirs
 configure_clock
 configure_chime
 echo ""
 
-echo "[5/6] Bluetooth permission check..."
-echo "  On first run the daemon will trigger a Bluetooth permission prompt."
-echo "  macOS only prompts for foreground processes — so we'll run it"
-echo "  interactively once below. Press Ctrl+C after you see 'Scanning...'"
-echo "  and grant permission when prompted. Then re-run this installer"
-echo "  (or just continue) to enable launchd autostart."
-echo ""
-read -r -p "Run a permission-priming scan now? [Y/n] " ans
-if [[ ! "$ans" =~ ^[Nn]$ ]]; then
-    "$PYTHON_BIN" "$DAEMON_PY" || true
-fi
+echo "[6/7] Loading launchd service..."
+launchctl unload "$PLIST_DST" 2>/dev/null || true
+launchctl load -w "$PLIST_DST"
+echo "  Loaded."
 echo ""
 
-# blueutil needs its OWN Bluetooth permission (separate identity from the
-# Python daemon) to auto-recover from a stale bond. It BLOCKS instead of
-# erroring when unauthorized, so prime it now behind a bounded wait: this
-# returns instantly if already authorized, or triggers the one-time Bluetooth
-# permission prompt (the grant sticks even if we time out before you click).
+echo "[7/7] Bluetooth permission..."
+echo "  The daemon now runs under launchd through ClawdmeterDaemon.app. The"
+echo "  FIRST time it touches Bluetooth, macOS shows a permission prompt for"
+echo "  'Clawdmeter Daemon' — click Allow. If you miss it (or it's denied),"
+echo "  enable it at System Settings > Privacy & Security > Bluetooth."
+echo "  No terminal needs to stay open; the grant persists across reboots."
+echo ""
+# blueutil needs its OWN Bluetooth permission (separate identity from the .app)
+# to auto-recover from a stale bond. It BLOCKS instead of erroring when
+# unauthorized, so prime it now behind a bounded wait: this returns instantly
+# if already authorized, or triggers the one-time prompt (the grant sticks even
+# if we time out before you click).
 if command -v blueutil >/dev/null 2>&1; then
     echo "  Priming blueutil's Bluetooth permission (grant if prompted)..."
     blueutil --paired >/dev/null 2>&1 &
@@ -248,12 +270,6 @@ if command -v blueutil >/dev/null 2>&1; then
     fi
     kill "$bu_killer" 2>/dev/null || true
 fi
-echo ""
-
-echo "[6/6] Loading launchd service..."
-launchctl unload "$PLIST_DST" 2>/dev/null || true
-launchctl load -w "$PLIST_DST"
-echo "  Loaded."
 echo ""
 
 echo "=== Done ==="
