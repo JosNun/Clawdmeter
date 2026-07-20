@@ -1,23 +1,25 @@
 # Project context
 
-ESP32-S3 / ESP32-C6 firmware for a desk-side Claude Code usage monitor. Each
-supported board lives in its own `firmware/src/boards/<name>/` folder and is
-selected via PlatformIO's `build_src_filter`. Adding a board means dropping in
-a new folder + a new `[env:...]` block — `main.cpp`, `ui.cpp`, and `splash.cpp`
-never see board-specific code. See [`docs/porting/adding-a-board.md`](docs/porting/adding-a-board.md).
+ESP32-WROOM-32 firmware for a desk-side Claude Code usage monitor, driving an
+SSD1306 128×32 monochrome OLED. This is a **personal single-board fork** of
+[HermannBjorgvin/Clawdmeter](https://github.com/HermannBjorgvin/Clawdmeter):
+upstream's other board ports (the Waveshare AMOLED / LCD boards) have been
+dropped to keep this tree focused on one device. The board's code lives in
+`firmware/src/boards/esp32_ssd1306/` and is selected via PlatformIO's
+`build_src_filter`. The HAL boundary that made upstream multi-board is kept —
+shared `main.cpp`, `ui.cpp`, and `splash.cpp` still never see board-specific
+code — so a port could be re-added later as a new folder + `[env:...]` block.
+See [`docs/porting/adding-a-board.md`](docs/porting/adding-a-board.md).
 
-Six ports today (three SoC families):
+> **Deferred cleanup:** the shared code still carries upstream subsystems this
+> board doesn't use (sound/chime, IMU/rotation, touch, battery/PMU, HID). They
+> no-op here (`caps.cpp` clears the `BOARD_HAS_*` flags / the board's HAL files
+> stub them), so they don't hurt, but stripping them is a planned follow-up. The
+> Hardware section below still documents the removed AMOLED/LCD boards until then.
 
-- `boards/waveshare_amoled_216/` — original Waveshare ESP32-S3-Touch-AMOLED-2.16 (CO5300, 480×480 square, CST9220 touch, IMU rotation). Build env: `waveshare_amoled_216`.
-- `boards/waveshare_amoled_18/` — Waveshare ESP32-S3-Touch-AMOLED-1.8 (368×448 portrait, XCA9554 IO expander). Build env: `waveshare_amoled_18`. **Two panel revisions are auto-detected at boot** (`board_rev()` in `board_init.cpp`, enum in `board_rev.h`): original = SH8601 display + FT3168 touch (0x38); later = CO5300 display + CST816 touch (0x15). One binary drives both.
-- `boards/waveshare_amoled_216_c6/` — Waveshare ESP32-C6-Touch-AMOLED-2.16 (SH8601, 480×480, CST9217 touch). Build env: `waveshare_amoled_216_c6`. ESP32-C6 SoC: single-core RISC-V, **no PSRAM**, BLE 5 only.
-- `boards/waveshare_amoled_18_c6/` — Waveshare ESP32-C6-Touch-AMOLED-1.8 (368×448 portrait, SH8601, FT3168 touch, TCA9554 expander). Build env: `waveshare_amoled_18_c6`. Same panel as the S3 1.8 but on the C6 SoC. All subsystems (display, touch, BOOT + PWR buttons, battery, BLE) verified on hardware.
-- `boards/waveshare_amoled_206/` — Waveshare ESP32-S3-Touch-AMOLED-2.06 (CO5300, 410×502 watch form factor, FT3168 touch, no IO expander, 32 MB flash, PCF85063 RTC, ES8311 codec). Build env: `waveshare_amoled_206`. Display, touch, battery, IMU init, and BLE verified on hardware; the ES8311 chime path is not wired up (`sound.cpp` no-ops).
 - `boards/esp32_ssd1306/` — plain **ESP32-WROOM-32** dev board + **SSD1306 128×32 monochrome OLED over I2C** (SDA 21 / SCL 22, addr auto-probed 0x3C→0x3D). Build env: `esp32_ssd1306`. **Display-only port**: no touch, no PMU/battery, no IMU, no buttons/HID — just the quota usage on a 2-row mini layout. The SSD1306 is 1-bit, nothing like the QSPI AMOLEDs: a vendored `ssd1306.{h,cpp}` driver holds a 512-byte framebuffer, and `display.cpp` thresholds LVGL's RGB565 render strips to on/off pixels (so shared code stays RGB565 — no `LV_COLOR_DEPTH` change). UI uses a responsive `tiny` breakpoint in `ui.cpp::compute_layout()` (`height < 64`) that reuses the existing widgets. Boots straight to the usage view. The usage view has **two display modes** (`display_mode_t`, menu "View" item → `ui_mode_cycle()`): `MODE_INFO` (the 2-row bars) and `MODE_PLAYFUL` ("Claude's day" — session quota as a rippling dithered tide on a full-panel ARGB canvas, weekly as a setting sun, a claudepix creature floating on the surface that frets ≥80%, and a black-backed "S## W##" chip). The two are siblings of `usage_group` swapped by the same view-wipe; the playful scene is tiny-only (`playful_group` null elsewhere → `ui_mode_*` no-op). **Verified on hardware**: display, BLE (advertises "Clawdmeter", macOS daemon connects), and the 2-row usage layout all render correctly. `screenshot` works here too (see QA note below).
 
-**C6 ports have no PSRAM** — shared code gates on `BOARD_HAS_PSRAM` (absent on C6) to use `MALLOC_CAP_INTERNAL` for LVGL/splash buffers, and the `screenshot` serial command is disabled (`LV_USE_SNAPSHOT=0`), so UI changes on a C6 board must be eyeballed on hardware, not auto-captured.
-
-The shared code calls a small HAL (`firmware/src/hal/`) that each board implements: display, touch, input, power, IMU. Optional features are guarded by `BoardCaps` (runtime) and `BOARD_HAS_*` (compile-time) rather than `#ifdef BOARD_*`.
+The shared code calls a small HAL (`firmware/src/hal/`) that the board implements: display, touch, input, power, IMU. Optional features are guarded by `BoardCaps` (runtime) and `BOARD_HAS_*` (compile-time) rather than `#ifdef BOARD_*`.
 
 Connects to a host daemon over BLE; daemon polls Anthropic API for usage data. This file is for future Claude Code sessions to bootstrap quickly. Read this first.
 
