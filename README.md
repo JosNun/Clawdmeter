@@ -38,6 +38,20 @@ Boards supported out of the box:
 
 **Porting to another board:** the firmware is a thin HAL with per-board folders under `firmware/src/boards/`. Drop in a new folder and a new PlatformIO env — `main.cpp`, `ui.cpp`, and `splash.cpp` never need to change. See [`docs/porting/adding-a-board.md`](docs/porting/adding-a-board.md) for the walk-through and [`docs/porting/hal-contract.md`](docs/porting/hal-contract.md) for the interfaces a port must implement.
 
+## Case
+
+There's a 3D-printable enclosure for the ESP32-WROOM-32 + SSD1306 + EC11 build in [`case/`](case/) — a sloped-front desktop console with the OLED and a rotary-encoder knob on the front facet and a removable base plate. It's a parametric [ForgeCAD](https://forgecad.io) model (`.forge.js`), so you can tweak dimensions and re-export rather than editing a mesh.
+
+![Case assembly render](case/assembly.png)
+
+Quick start (see [`case/README.md`](case/README.md) for the full print guide, fit-test coupons, and hardware list):
+
+```bash
+npm install -g forgecad
+# Print the three parts (Body, Base Plate, OLED Retainer) — OCCT backend is required for the fillets:
+forgecad export stl case/enclosure.forge.js --backend occt --param "Export Part=Body" --output body.stl
+```
+
 ## Prerequisites
 
 - Linux (tested on Ubuntu), macOS, or Windows 10/11

@@ -1,0 +1,12 @@
+# Generated exports / renders — regenerated from the .forge.js sources
+*.stl
+*.3mf
+*.step
+*.stp
+*.png
+*.svg
+outputs/
+node_modules/
+
+# ...except the doc render committed for the README
+!assembly.png
