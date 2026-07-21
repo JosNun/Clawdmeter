@@ -12,15 +12,8 @@ firmware/.vscode/
 tools/node_modules/
 tools/package-lock.json
 
-# Mac daemon venv (legacy Python daemon)
-daemon/.venv/
-
-# Mac daemon app bundle (legacy Python TCC wrapper, built from daemon/macapp/)
-daemon/ClawdmeterDaemon.app/
-
 # Swift daemon build artifacts + installed binary (built by install-mac.sh)
 daemon/ClawdmeterDaemon/.build/
-daemon/swift-spike/.build/
 daemon/clawdmeter-daemon
 
 # Python bytecode cache

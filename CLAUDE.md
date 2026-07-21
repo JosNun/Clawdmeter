@@ -179,16 +179,27 @@ See `~/.claude/projects/.../memory/` files for persistent context (user is an em
 
 ## Daemon / host side
 
-Bash daemon (`daemon/claude-usage-daemon.sh`) reads OAuth token, polls Anthropic API, sends JSON over BLE GATT. Run with `systemctl --user start claude-usage-daemon`. The unit file's `ExecStart` is the absolute path to the script — repoint it when switching between the worktree and the main checkout.
+Three host implementations, one BLE/GATT contract (below). Pick by OS:
 
-**Discovery & resilience:**
+- **macOS — native Swift / CoreBluetooth (`daemon/ClawdmeterDaemon/`).** SwiftPM executable built + ad-hoc-signed by `install-mac.sh` into `daemon/clawdmeter-daemon`, run under launchd (`com.user.claude-usage-daemon`). No Python/venv/.app. Bluetooth (TCC) permission is owned by the binary itself via an embedded `Info.plist` (`NSBluetoothAlwaysUsageDescription` + bundle id, injected with linker `-sectcreate`); the ad-hoc signature gives a stable cdhash so the grant persists. Token from Keychain (`security find-generic-password -s "Claude Code-credentials"`), optional settings from `~/.config/claude-usage-monitor/config`.
+- **Linux — bash daemon (`daemon/claude-usage-daemon.sh`).** Run with `systemctl --user start claude-usage-daemon`; the unit's `ExecStart` is the absolute script path — repoint it when switching between the worktree and the main checkout.
+- **Windows — Python daemon (`daemon/claude_usage_daemon_windows.py`).** Standalone module; tests under `daemon/tests/test_windows_*`.
+
+All three poll the Anthropic API (a 1-token Haiku request read only for its `anthropic-ratelimit-unified-*` response headers) and push JSON over BLE GATT. `POLL_INTERVAL=60`, `TICK=5` (inner loop wakes every 5s to catch disconnects fast; polls when 60s elapsed OR the ESP fires a refresh request).
+
+**macOS discovery & resilience (Swift):**
+
+- Discovery order: `retrieveConnectedPeripherals` on the custom service, then on HID (`0x1812`) + exact name, then a name-scan fallback. The firmware advertises as an HID keyboard, so macOS auto-connects it and hides it from scans — `retrieveConnected*` is the escape hatch.
+- Every delegate→async continuation has a timeout/failure path, and `teardown()` fails all in-flight continuations + drops the link on radio-off OR disconnect. This is what survives sleep/wake: the radio can power off WITHOUT a `didDisconnect` callback, which previously wedged a parked `.withResponse` write forever. Failed polls also wait a full `POLL_INTERVAL` rather than hot-looping an overloaded API.
+- Stale macOS bond self-heal via optional `blueutil` (unpair on encryption error — `CBError` code 15).
+
+**Linux discovery & resilience (bash):**
 
 - Connects by name (`"Clawdmeter"`) on first run, caches resolved MAC at `~/.config/claude-usage-monitor/ble-address`. ESP32 BLE addresses are factory-burned per-chip, so swapping any board invalidates the cache.
 - On connect failure: cache is dropped AND device is removed from bluez (`bluetoothctl remove`) so the next scan won't re-pick a dead MAC. Multi-candidate scans pick `head -1` and let the failure cycle converge.
-- `POLL_INTERVAL=60`, `TICK=5`. Inner loop wakes every 5s to detect disconnects fast; polls Anthropic when 60s elapsed OR when ESP fires a refresh request.
 
 **GATT characteristics on service `4c41555a-...0001`:**
 
 - `...0002` RX — daemon writes JSON usage payload here.
 - `...0003` TX — firmware notifies ack/nack (daemon doesn't subscribe).
-- `...0004` REQ — firmware fires `0x01` notify in `onSubscribe` if `has_received_data` is false. Daemon subscribes via `setsid bash -c "stdbuf -oL dbus-monitor … | awk …"`; awk drops a flag file the inner loop picks up. See the `feedback_dbus_monitor_pipe` memory for the three subtle gotchas (pipe buffering, busctl-exits race, `wait` blocking on pipeline jobs).
+- `...0004` REQ — firmware fires `0x01` notify in `onSubscribe` if `has_received_data` is false. The macOS Swift daemon subscribes natively (delegate `didUpdateValueFor` sets a refresh-pending flag the run loop drains). The Linux bash daemon subscribes via `setsid bash -c "stdbuf -oL dbus-monitor … | awk …"`; awk drops a flag file the inner loop picks up — see the `feedback_dbus_monitor_pipe` memory for the three subtle gotchas (pipe buffering, busctl-exits race, `wait` blocking on pipeline jobs).
