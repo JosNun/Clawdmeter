@@ -5,15 +5,13 @@
     <key>Label</key>
     <string>com.user.claude-usage-daemon</string>
 
-    <!-- argv[0] is the .app bundle's Mach-O launcher so macOS attributes
-         Bluetooth (TCC) access to "Clawdmeter Daemon" rather than to the bare
-         python3 (which can't own a permission prompt). The launcher fork+execs
-         python with the daemon and forwards SIGTERM/SIGINT for clean shutdown. -->
+    <!-- The Swift daemon is a natively-signed Mach-O with an embedded Info.plist
+         (NSBluetoothAlwaysUsageDescription + CFBundleIdentifier), so macOS
+         attributes Bluetooth (TCC) access to it directly — no python/.app
+         wrapper needed to own the permission prompt. -->
     <key>ProgramArguments</key>
     <array>
-        <string>__APP_EXEC__</string>
-        <string>__PYTHON_BIN__</string>
-        <string>__DAEMON_PATH__</string>
+        <string>__DAEMON_BIN__</string>
     </array>
 
     <key>WorkingDirectory</key>
