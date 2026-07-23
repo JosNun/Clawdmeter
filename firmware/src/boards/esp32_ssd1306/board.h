@@ -34,11 +34,10 @@
 
 // ---- Rotary encoder (EC11-style, common pins to GND, internal pullups) ----
 // Five wires: two GNDs (encoder common + one switch leg) and three signals on
-// GPIO 23/32/33. Two signals are the A/B quadrature phases, one is the push
-// switch. The exact mapping below is a first guess — use the `encdbg` serial
-// command to confirm which GPIO is which (rotate → the two A/B pins toggle;
-// press → the SW pin reads LOW), then fix these defines. If clockwise turns
-// register as counter-clockwise, set ENC_REVERSED to 1 (or swap A/B).
+// GPIO 23/32/33 — A/B quadrature phases plus the push switch. Mapping below is
+// verified on hardware. If you rewire, the `encdbg` serial command reports which
+// GPIO is which (rotate → the two A/B pins toggle; press → the SW pin reads LOW);
+// set ENC_REVERSED to 1 (or swap A/B) if clockwise turns register backwards.
 #define BOARD_HAS_ENCODER     1
 #define ENC_PIN_A             32
 #define ENC_PIN_B             33

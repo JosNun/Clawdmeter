@@ -2,49 +2,80 @@
 
 A small ESP32 dashboard I made for my desk to keep an eye on Claude Code usage.
 
-It runs on a [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-s3-touch-amoled-2.16.htm?&aff_id=149786) as well as a few other alternative boards and pairs over Bluetooth, the splash screen plays pixel-art Clawd animations that get
-busier when your usage rate climbs. The two side buttons send Space and
-Shift+Tab over BLE HID for Claude Code's voice mode and mode-toggle shortcuts.
+It runs on a plain **ESP32-WROOM-32** dev board driving a **128×32 SSD1306
+monochrome OLED**, with an **EC11 rotary encoder** for input. A host daemon
+polls your Claude usage and pushes it to the display over Bluetooth. The usage
+view has two looks: a plain two-row meter, and a playful "Claude's day" scene
+where the session quota is a rising dithered tide, the weekly quota is a setting
+sun, and a little Clawd creature floats on the water and starts to fret as you
+approach your limit.
 
-|              Usage meter              |              Clawd animation screen              |
-| :-----------------------------------: | :----------------------------------------------: |
-| ![Usage meter](assets/demo.jpeg) | ![Clawd animation screen](assets/demo.gif) |
+![Playful "Claude's day" mode at rising quota levels](screenshots/playful.png)
 
-The Clawd animations come from [claudepix](https://claudepix.vercel.app), [@amaanbuilds](https://x.com/amaanbuilds)'s library of pixel-art Clawd sprites, check it out, it's lovely.
+The Clawd sprite comes from [claudepix](https://claudepix.vercel.app),
+[@amaanbuilds](https://x.com/amaanbuilds)'s library of pixel-art Clawd sprites —
+check it out, it's lovely.
 
-## Screens
+> **Single-board personal fork.** This tree is a fork of
+> [HermannBjorgvin/Clawdmeter](https://github.com/HermannBjorgvin/Clawdmeter)
+> narrowed to one device. Upstream's Waveshare AMOLED/LCD board ports have been
+> dropped to keep it focused. The multi-board HAL boundary is still intact
+> (`main.cpp`, `ui.cpp`, and `splash.cpp` never see board-specific code), so a
+> port can be re-added as a new folder — see
+> [`docs/porting/adding-a-board.md`](docs/porting/adding-a-board.md).
 
-The device boots into the splash. Tap the screen anywhere to switch to the Usage view; tap again to flip back to the splash.
+## Controls
 
-|              Splash               |              Usage              |
-| :-------------------------------: | :-----------------------------: |
-| ![Splash](screenshots/splash.png) | ![Usage](screenshots/usage.png) |
-|   Splash; touch-toggle anytime    | Session and weekly utilization  |
+Everything is driven by the rotary encoder — turn to move, push to select.
 
-While the splash is up, the middle (PWR) button cycles animations. **Hold the power button for 3 seconds, then release, to put the device into pairing mode** — this clears the saved Bluetooth bond and re-advertises. The firmware also auto-rotates animations every 20 s within the current usage-rate group, so a long stretch on the splash isn't just one Clawd on loop.
+- **On the usage view:** turn to switch between the two display modes (the
+  two-row meter and the playful "Claude's day" scene); push to open the settings
+  menu.
+- **In the menu:** turn to move the selection, push to activate. The menu
+  auto-closes after a few seconds of inactivity.
+
+Menu items: **Refresh now** (ask the daemon for fresh data), **Brightness**
+(push, then turn to adjust), **Re-pair** (clear the saved Bluetooth bond and
+re-advertise), **Sleep display**, **Back**. The display also sleeps on its own
+after a while; any turn or press wakes it.
 
 ## Hardware
 
-Boards supported out of the box:
+A single board, all over one I2C bus plus three encoder pins:
 
-- [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-s3-touch-amoled-2.16.htm?&aff_id=149786)
-- [Waveshare ESP32-C6-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-c6-touch-amoled-2.16.htm?&aff_id=149786) 
-- [Waveshare ESP32-S3-Touch-AMOLED-1.8](https://www.waveshare.com/esp32-s3-touch-amoled-1.8.htm?&aff_id=149786)
-- [Waveshare ESP32-C6-Touch-AMOLED-1.8](https://www.waveshare.com/esp32-c6-touch-amoled-1.8.htm?&aff_id=149786)
-- [Waveshare ESP32-S3-Touch-AMOLED-2.06](https://www.waveshare.com/esp32-s3-touch-amoled-2.06.htm?&aff_id=149786)
-- [Waveshare ESP32-S3-Touch-LCD-1.54](https://www.waveshare.com/esp32-s3-lcd-1.54.htm?sku=33869) (240x240 SPI TFT, not AMOLED)
+| Part | Connection |
+| ---- | ---------- |
+| **ESP32-WROOM-32** dev board | USB (CP2102/CH340 UART bridge) |
+| **SSD1306 128×32 OLED** | I2C — SDA `GPIO 21`, SCL `GPIO 22` (address auto-probed `0x3C` → `0x3D`) |
+| **EC11 rotary encoder** | A `GPIO 32`, B `GPIO 33`, switch `GPIO 23` — commons to GND, internal pullups |
 
-> Please check if a pull request exists for your alternative hardware port before opening a new one, providing QA feedback and testing on the same hardware is more valuable than duplicate pull requests.
+The encoder pin mapping lives in `firmware/src/boards/esp32_ssd1306/board.h`. If
+you wire yours differently, adjust the `ENC_PIN_*` defines (the `encdbg` serial
+command reports which GPIO is which — rotate and the A/B pins toggle, press and
+the switch reads LOW), and flip `ENC_REVERSED` if clockwise registers as
+counter-clockwise.
 
-**Porting to another board:** the firmware is a thin HAL with per-board folders under `firmware/src/boards/`. Drop in a new folder and a new PlatformIO env — `main.cpp`, `ui.cpp`, and `splash.cpp` never need to change. See [`docs/porting/adding-a-board.md`](docs/porting/adding-a-board.md) for the walk-through and [`docs/porting/hal-contract.md`](docs/porting/hal-contract.md) for the interfaces a port must implement.
+This is a display-only port: no touch, no battery, no IMU, no HID keys.
+
+**Porting to another board:** the firmware is a thin HAL with per-board folders
+under `firmware/src/boards/`. Drop in a new folder and a new PlatformIO env —
+`main.cpp`, `ui.cpp`, and `splash.cpp` never need to change. See
+[`docs/porting/adding-a-board.md`](docs/porting/adding-a-board.md) for the
+walk-through and [`docs/porting/hal-contract.md`](docs/porting/hal-contract.md)
+for the interfaces a port must implement.
 
 ## Case
 
-There's a 3D-printable enclosure for the ESP32-WROOM-32 + SSD1306 + EC11 build in [`case/`](case/) — a sloped-front desktop console with the OLED and a rotary-encoder knob on the front facet and a removable base plate. It's a parametric [ForgeCAD](https://forgecad.io) model (`.forge.js`), so you can tweak dimensions and re-export rather than editing a mesh.
+There's a 3D-printable enclosure for the ESP32-WROOM-32 + SSD1306 + EC11 build in
+[`case/`](case/) — a sloped-front desktop console with the OLED and a
+rotary-encoder knob on the front facet and a removable base plate. It's a
+parametric [ForgeCAD](https://forgecad.io) model (`.forge.js`), so you can tweak
+dimensions and re-export rather than editing a mesh.
 
 ![Case assembly render](case/assembly.png)
 
-Quick start (see [`case/README.md`](case/README.md) for the full print guide, fit-test coupons, and hardware list):
+Quick start (see [`case/README.md`](case/README.md) for the full print guide,
+fit-test coupons, and hardware list):
 
 ```bash
 npm install -g forgecad
@@ -57,36 +88,48 @@ forgecad export stl case/enclosure.forge.js --backend occt --param "Export Part=
 - Linux (tested on Ubuntu), macOS, or Windows 10/11
 - [PlatformIO CLI](https://docs.platformio.org/en/latest/core/installation/index.html)
 - Linux: `curl`, `bluetoothctl`, `busctl` (BlueZ Bluetooth stack)
-- macOS: `python3` (the installer sets up a venv with `bleak` and `httpx`)
+- macOS: Xcode Command Line Tools (`xcode-select --install`) for `swift` + `codesign`; optionally `blueutil` (`brew install blueutil`) to auto-forget a stale bond after a reflash
 - Windows: `python3` 3.11+ (the installer sets up a venv with `bleak`, `httpx`, and `pystray`)
 - Claude Code with an active subscription
 
 ## macOS installation
 
-The macOS host pieces — Python daemon, LaunchAgent, and flash helper — were ported by [Chris Davidson (@lorddavidson)](https://github.com/lorddavidson). Thanks Chris!
-
 ### Flash the firmware
 
+The WROOM-32 talks over a UART bridge, so its port is `/dev/cu.usbserial-*` (or
+`/dev/cu.SLAB_USBtoUART`) — **pass it explicitly**, since `flash-mac.sh`'s
+auto-detect only looks for the native-USB `/dev/cu.usbmodem*`:
+
 ```bash
-./flash-mac.sh waveshare_amoled_216                       # auto-detects /dev/cu.usbmodem*
-./flash-mac.sh waveshare_amoled_18  /dev/cu.usbmodem1101  # or pass an explicit USB serial port
+./flash-mac.sh esp32_ssd1306 /dev/cu.usbserial-0001
 ```
 
-The board env name is required. Run `./flash-mac.sh` with no args to see the available envs (scraped from `firmware/platformio.ini`).
+Run `./flash-mac.sh` with no args to see the available envs (scraped from
+`firmware/platformio.ini`).
 
 ### Pair the device
 
-After flashing, open **System Settings → Bluetooth** and click *Connect* next to "Clawdmeter". The daemon only ever connects to the peripheral this Mac is paired/connected to — it never scans for a nearby device — so once it's connected here the daemon picks it up on its next poll (~60 s).
+After flashing, open **System Settings → Bluetooth** and click *Connect* next to
+"Clawdmeter". The daemon only ever connects to the peripheral this Mac is
+paired/connected to — it never scans for a nearby device — so once it's connected
+here the daemon picks it up on its next poll (~60 s).
 
 ### Install the daemon
 
-The daemon reads your Claude OAuth token from the macOS Keychain (service `Claude Code-credentials`), polls usage every 60 s, and pushes it to the display over BLE.
+The macOS daemon is a native Swift / CoreBluetooth binary run under launchd. It
+reads your Claude OAuth token from the Keychain (service `Claude Code-credentials`),
+polls usage every 60 s, and pushes it to the display over BLE.
 
 ```bash
 ./install-mac.sh
 ```
 
-The installer creates a Python venv in `daemon/.venv/`, installs `bleak` and `httpx`, renders a LaunchAgent into `~/Library/LaunchAgents/com.user.claude-usage-daemon.plist`, and loads it. The first run is launched interactively so macOS prompts for Bluetooth permission.
+The installer builds the Swift package in `daemon/ClawdmeterDaemon/`, ad-hoc-signs
+the binary (the signature carries its own Bluetooth-permission identity via an
+embedded `Info.plist`, so the TCC grant sticks across launches), installs it to
+`daemon/clawdmeter-daemon`, renders a LaunchAgent into
+`~/Library/LaunchAgents/com.user.claude-usage-daemon.plist`, and loads it. The
+first run is interactive so macOS can prompt for Bluetooth permission.
 
 Useful commands:
 
@@ -101,12 +144,15 @@ launchctl load -w ~/Library/LaunchAgents/com.user.claude-usage-daemon.plist # st
 
 ### Flash the firmware
 
+The WROOM-32's UART bridge shows up as `/dev/ttyUSB0` (not the `/dev/ttyACM0`
+that the S3/C6 native-USB boards use), so pass it explicitly:
+
 ```bash
-./flash.sh waveshare_amoled_216                  # defaults to /dev/ttyACM0
-./flash.sh waveshare_amoled_18  /dev/ttyACM1     # or pass an explicit USB serial port
+./flash.sh esp32_ssd1306 /dev/ttyUSB0
 ```
 
-The board env name is required. Run `./flash.sh` with no args to see the available envs (scraped from `firmware/platformio.ini`).
+Run `./flash.sh` with no args to see the available envs (scraped from
+`firmware/platformio.ini`).
 
 ### Pair the device
 
@@ -121,11 +167,13 @@ bluetoothctl pair F4:12:FA:C0:8F:E5    # use your device's MAC
 bluetoothctl trust F4:12:FA:C0:8F:E5
 ```
 
-To re-pair later, hold the power button for 3 seconds then release — the device clears its saved bond and re-advertises.
+To re-pair later, use the **Re-pair** item in the on-device menu — it clears the
+saved bond and re-advertises.
 
 ### Install the daemon
 
-The daemon polls your Claude usage every 60 seconds and sends it to the display over BLE.
+The daemon polls your Claude usage every 60 seconds and sends it to the display
+over BLE.
 
 ```bash
 ./install.sh
@@ -138,7 +186,8 @@ View logs: `journalctl --user -u claude-usage-daemon -f`
 
 ## Windows installation
 
-Runs natively on Windows — no WSL required. A system-tray app polls your usage and pushes it over BLE, and starts automatically at login.
+Runs natively on Windows — no WSL required. A system-tray app polls your usage
+and pushes it over BLE, and starts automatically at login.
 
 ### Prerequisites
 
@@ -150,14 +199,17 @@ Runs natively on Windows — no WSL required. A system-tray app polls your usage
 ### Flash the firmware
 
 ```powershell
-pio run -d firmware -e waveshare_amoled_216 -t upload --upload-port COM5   # use your device's COM port
+pio run -d firmware -e esp32_ssd1306 -t upload --upload-port COM5   # use your device's COM port
 ```
 
 Run `pio run -d firmware` with no env to see the available board envs.
 
 ### Pair the device
 
-The device is a bonded BLE HID keyboard, so pair it once: **Settings → Bluetooth & devices → Add device → Bluetooth**, then select "Clawdmeter". Pairing is **required** — it enables the physical buttons and keeps a persistent connection (the device keeps showing your last-synced usage even after the daemon quits). To undo, use **Remove device** (this disables the buttons).
+Pair it once: **Settings → Bluetooth & devices → Add device → Bluetooth**, then
+select "Clawdmeter". Pairing keeps a persistent connection, so the device keeps
+showing your last-synced usage even after the daemon quits. To undo, use **Remove
+device**.
 
 ### Install the daemon (recommended)
 
@@ -167,7 +219,10 @@ From the repo root in PowerShell:
 powershell -ExecutionPolicy Bypass -File install-windows.ps1
 ```
 
-This creates a venv, installs `bleak`/`httpx`/`pystray`/`Pillow` from the in-repo requirements (no internet downloads), registers a per-user login-autostart entry (`HKCU\…\Run`, no admin needed), and launches the tray app headlessly (no console window).
+This creates a venv, installs `bleak`/`httpx`/`pystray`/`Pillow` from the in-repo
+requirements (no internet downloads), registers a per-user login-autostart entry
+(`HKCU\…\Run`, no admin needed), and launches the tray app headlessly (no console
+window).
 
 ### Run manually instead (optional)
 
@@ -180,7 +235,10 @@ python daemon\claude_usage_daemon_windows.py        # runs in the foreground; Ct
 
 ### Tray icon and menu
 
-The icon's corner bubble shows state — **green** Connected, **amber** Scanning, **red** Error — and hovering shows the status (`Connected · last update HH:MM`). A notification fires once when it enters Error (e.g. an expired token). Right-click for the menu:
+The icon's corner bubble shows state — **green** Connected, **amber** Scanning,
+**red** Error — and hovering shows the status (`Connected · last update HH:MM`).
+A notification fires once when it enters Error (e.g. an expired token).
+Right-click for the menu:
 
 - **Status header** — live state + last sync time.
 - **Start at login** — toggle autostart on/off.
@@ -207,24 +265,14 @@ reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v Clawdmeter /f
 3. The usage numbers come straight out of the response headers (`anthropic-ratelimit-unified-5h-utilization` and friends).
 4. The daemon connects to the ESP32 over BLE and writes a JSON payload to the GATT RX characteristic.
 5. The firmware parses it and updates the LVGL dashboard.
-6. The firmware also tracks the rate of change of session % over a 5-minute window and picks splash animations from the matching mood group.
-7. The two side buttons are independent of all of this — they send Space and Shift+Tab as BLE HID keyboard input to the paired host directly.
-
-## Physical buttons
-
-The board has three side buttons. Left and right send HID keys; the middle (PWR) button cycles splash animations and, held for 3 seconds, triggers pairing mode.
-
-| Button           | GPIO         | Function                                                       |
-| ---------------- | ------------ | -------------------------------------------------------------- |
-| **Left**         | GPIO 0       | Hold to send Space (Claude Code voice-mode push-to-talk)       |
-| **Middle** (PWR) | AXP2101 PKEY | On splash: cycle animations. Hold 3s + release: pairing mode |
-| **Right**        | GPIO 18      | Press to send Shift+Tab (Claude Code mode toggle)              |
-
-Space and Shift+Tab go out as standard BLE HID keyboard reports, so they trigger in whatever window has focus on the paired host — not just Claude Code.
+6. In the playful "Claude's day" mode, the session quota drives the tide height and the Clawd creature starts to fret once you cross ~80%.
 
 ## BLE protocol
 
-The device advertises a custom GATT service alongside the standard HID keyboard service:
+The device exposes a custom GATT data service. It also advertises the standard
+HID keyboard service — not because it sends any keys (it doesn't; there are no
+HID buttons on this board), but because macOS auto-connects HID peripherals and
+that's what makes the daemon's `retrieveConnectedPeripherals` discovery path work.
 
 |                            | UUID                                   |
 | -------------------------- | -------------------------------------- |
@@ -252,23 +300,27 @@ npm install -g lv_font_conv
 Generate each one (one at a time — `lv_font_conv` doesn't like loop-driven invocations) with `--no-compress` (required for LVGL 9):
 
 ```bash
-# Tiempos Text (titles, 56px)
-lv_font_conv --font assets/TiemposText-400-Regular.otf -r 0x20-0x7E \
-  --size 56 --format lvgl --bpp 4 --no-compress \
-  -o firmware/src/font_tiempos_56.c --lv-include "lvgl.h"
+# Tiempos Text (titles) — 56 and 34px
+for size in 56 34; do
+  lv_font_conv --font assets/TiemposText-400-Regular.otf -r 0x20-0x7E \
+    --size $size --format lvgl --bpp 4 --no-compress \
+    -o firmware/src/font_tiempos_${size}.c --lv-include "lvgl.h"
+done
 
-# Styrene B (large numbers 48, panel labels 28, small text 24, minimal 20)
-for size in 48 28 24 20; do
+# Styrene B (numbers, labels, and the tiny 128×32 layout) — 48 down to 12px
+for size in 48 28 24 20 16 14 12; do
   lv_font_conv --font assets/StyreneB-Regular.otf -r 0x20-0x7E \
     --size $size --format lvgl --bpp 4 --no-compress \
     -o firmware/src/font_styrene_${size}.c --lv-include "lvgl.h"
 done
 
-# DejaVu Sans Mono (32px, with spinner Unicode chars)
-lv_font_conv --font assets/DejaVuSansMono.ttf \
-  -r 0x20-0x7E,0xB7,0x2026,0x2722,0x2733,0x2736,0x273B,0x273D \
-  --size 32 --format lvgl --bpp 4 --no-compress \
-  -o firmware/src/font_mono_32.c --lv-include "lvgl.h"
+# DejaVu Sans Mono (with spinner Unicode chars) — 32 and 18px
+for size in 32 18; do
+  lv_font_conv --font assets/DejaVuSansMono.ttf \
+    -r 0x20-0x7E,0xB7,0x2026,0x2722,0x2733,0x2736,0x273B,0x273D \
+    --size $size --format lvgl --bpp 4 --no-compress \
+    -o firmware/src/font_mono_${size}.c --lv-include "lvgl.h"
+done
 ```
 
 **Important:** `lv_font_conv` v1.5.3 outputs LVGL 8 format. Each generated file must be patched for LVGL 9 compatibility:
@@ -280,38 +332,31 @@ lv_font_conv --font assets/DejaVuSansMono.ttf \
 
 Without these patches, fonts compile but render as invisible.
 
-## Converting Lucide icons
+## Splash / creature animations
 
-The UI uses a small set of [Lucide](https://lucide.dev) icons (bluetooth + battery states) converted to RGB565 / RGB565A8 C arrays for LVGL.
-
-```bash
-node tools/png_to_lvgl.js assets/icon_bluetooth_48.png icon_bluetooth_data ICON_BLUETOOTH_WIDTH ICON_BLUETOOTH_HEIGHT
-```
-
-Default tint is white (`0xFFFFFF`); Lucide PNGs ship as black-on-transparent and would render invisible against the dark UI without it. Pass `--no-tint` for pre-coloured artwork like the logo. Battery icons use RGB565A8 (alpha plane) so they blend cleanly over the splash; the rest are baked RGB565 over the panel colour. Paste the converter output into `firmware/src/icons.h`.
-
-## Splash animations
-
-The animations come from [claudepix.vercel.app](https://claudepix.vercel.app),
-a library of Clawd sprites. `tools/scrape_claudepix.js` evaluates the
+The Clawd sprites come from [claudepix.vercel.app](https://claudepix.vercel.app),
+a library of pixel-art Clawd animations. `tools/scrape_claudepix.js` evaluates the
 site's JavaScript in a Node VM to pull out frame data and palettes, then
 `tools/convert_to_c.js` turns everything into RGB565 C arrays and writes
-`firmware/src/splash_animations.h`.
+`firmware/src/splash_animations.h`. The creature that floats in the playful
+"Claude's day" mode is drawn from these.
 
 To re-pull (e.g. when the source library updates):
 
 ```bash
 node tools/scrape_claudepix.js
 node tools/convert_to_c.js
-pio run -d firmware -t upload
+pio run -d firmware -e esp32_ssd1306 -t upload
 ```
 
-See `tools/README.md` for details.
+See `tools/README.md` for details. For fast offline iteration on the 128×32
+output, `tools/mini_sim.py` renders creatures and the playful scene applying the
+exact 1-bit threshold the panel uses — no flash, no hardware
+(`python3 tools/mini_sim.py playful`).
 
 ## Credits
 
 - Pixel-art Clawd animation by [@amaanbuilds](https://x.com/amaanbuilds), sourced from [claudepix.vercel.app](https://claudepix.vercel.app). Frame data and palettes scraped + converted by the tooling in `tools/`.
-- Lucide icon set ([lucide.dev](https://lucide.dev), MIT) for bluetooth and battery UI glyphs.
 - Anthropic brand fonts (Tiempos Text, Styrene B) — see licensing warning below.
 
 ## Licensing gray area warning
